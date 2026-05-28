@@ -545,12 +545,12 @@ with tab_tools:
     st.header("🛠️ 常用工具集")
     tool_type = st.radio(
         "选择工具类型",
-        ["🧹 Excel 数据清洗", " 音频格式转换 (M4A->WAV)", "📻 音频格式转换 (WAV->PCM)", "💿 音频格式转换 (PCM->WAV)", "📉 音频采样率转换 (48K->16K)", "️ 测试 GAP 分析"],
+        ["🧹 Excel 数据清洗", "🎵 音频格式转换 (M4A->WAV)", "📻 音频格式转换 (WAV->PCM)", "💿 音频格式转换 (PCM->WAV)", "📉 音频采样率转换 (48K->16K)", "🕳️ 测试 GAP 分析"],
         horizontal=True
     )
 
     # --- 1. Excel 数据清洗 ---
-    if tool_type == " Excel 数据清洗":
+    if tool_type == "🧹 Excel 数据清洗":
         st.subheader("🧹 Excel 语料数据清洗")
         st.info("从全功能清单中提取 Case ID、ASR 和中文翻译")
         
