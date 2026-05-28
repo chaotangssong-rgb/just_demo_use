@@ -12,6 +12,8 @@ import subprocess
 import shutil
 import wave
 from openpyxl.utils import get_column_letter
+from openpyxl import Workbook
+from openpyxl.styles import Font
 import zipfile
 import time
 
@@ -593,12 +595,48 @@ with tab_tools:
                                         results[lang].append({'req_id': req_id, 'case_id': case_id, 'asr': asr_content, 'zh_translation': zh_translation})
 
                         output = BytesIO()
-                        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                        
+                        # 创建新的 Excel workbook
+                        wb = Workbook()
+                        
+                        # 添加各个语言sheet
+                        for lang, data in results.items():
+                            if data:
+                                ws = wb.create_sheet(title=lang)
+                                # 添加表头
+                                headers = ['req_id', 'case_id', 'asr', 'zh_translation']
+                                ws.append(headers)
+                                # 设置表头样式
+                                for cell in ws[1]:
+                                    cell.font = Font(bold=True)
+                                # 添加数据
+                                for item in data:
+                                    ws.append([item['req_id'], item['case_id'], item['asr'], item['zh_translation']])
+                                # 自动筛选
+                                ws.auto_filter.ref = ws.dimensions
+                                # 调整列宽
+                                for col_idx, col_name in enumerate(['req_id', 'case_id', 'asr', 'zh_translation'], 1):
+                                    ws.column_dimensions[get_column_letter(col_idx)].width = 30
+                        
+                        # 添加"数据确认"sheet
+                        if any(results.values()):
+                            ws_confirm = wb.create_sheet(title="数据确认", index=0)
+                            ws_confirm.append(['语言', '数据条数'])
                             for lang, data in results.items():
-                                if data: pd.DataFrame(data).to_excel(writer, sheet_name=lang, index=False)
+                                if data:
+                                    ws_confirm.append([lang, len(data)])
+                            ws_confirm.column_dimensions['A'].width = 20
+                            ws_confirm.column_dimensions['B'].width = 15
+                        
+                        # 删除默认的Sheet
+                        if 'Sheet' in wb.sheetnames:
+                            del wb['Sheet']
+                        
+                        # 保存到 BytesIO
+                        wb.save(output)
                         
                         st.success("✅ 清洗完成！")
-                        st.download_button("📥 下载结果", data=output.getvalue(), file_name="cleaned_result.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                        st.download_button(" 下载结果", data=output.getvalue(), file_name="cleaned_result.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
                     except Exception as e:
                         st.error(f"❌ 处理失败: {str(e)}")
 
