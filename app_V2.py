@@ -9,20 +9,21 @@ from openai import OpenAI
 import pandas as pd
 import re
 import subprocess
-import shutil
 import wave
 from openpyxl.utils import get_column_letter
 from openpyxl import Workbook
 from openpyxl.styles import Font
 import zipfile
 import time
+import base64
+import hashlib
+import csv
 
 # ==================== 1. 配置与初始化 ====================
 
-# 设置页面配置
 st.set_page_config(
-    page_title="AI 语音语料智能处理平台",
-    page_icon="🚗",
+    page_title="AI智能测试与办公提效平台",
+    page_icon="",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -33,17 +34,15 @@ DEFAULT_API_KEY = "sk-e10cbbca48ea4f23a590884e59b3d7c9"
 # ==================== 2. 侧边栏 - API Key 配置 ====================
 
 with st.sidebar:
-    st.header("⚙️ 系统配置")
-
-    # API Key 使用模式选择
+    st.header("️ 系统配置")
+    
     api_key_mode = st.radio(
         "🔑 API Key 模式",
         options=["默认 API Key", "自定义 API Key"],
         help="选择使用默认配置的 API Key 或自己输入",
         index=0
     )
-
-    # 根据模式设置 API Key
+    
     if api_key_mode == "默认 API Key":
         api_key = DEFAULT_API_KEY
         st.info("✅ 使用默认 API Key")
@@ -56,593 +55,585 @@ with st.sidebar:
         )
         if api_key:
             st.session_state['api_key'] = api_key
-
-    # 配置 http_client（用于 OpenAI SDK 访问）
+    
     os.environ['NO_PROXY'] = '*'
     http_client = httpx.Client(verify=False, timeout=60.0, trust_env=False)
-
-    # 创建 OpenAI 客户端（使用兼容模式访问千问）
+    
     client_qwen = OpenAI(
         api_key=api_key,
         base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
         http_client=http_client
     )
-
-    # 设置 dashscope 的 API Key（备用）
+    
     if api_key:
         dashscope.api_key = api_key
         st.success("✅ API Key 已配置")
     else:
         st.warning("⚠️ 请先配置 API Key")
-
+    
     st.divider()
-
+    
     st.markdown("""
-    ### 📖 使用说明
-    1. **用例上传**: 上传 Excel 语料文件
-    2. **AI 设计**: AI 生成新语料
-    3. **批量标注**: 批量自动标注意图和槽位
-    4. **报告分析**: 数据统计和可视化分析
-    5. **工具箱**: Excel 清洗、音频转换等工具
+    ### 📖 功能说明
+    
+    ** AI测试助手**
+    - 测试用例生成
+    - Bug智能分析  
+    - 测试报告生成
+    
+    ** 办公提效工具**
+    - 文件格式转换
+    - 数据处理工具
+    - 文本处理工具
+    - 编码解码工具
+    
+    ** 音频工具箱**
+    - M4A/WAV/PCM互转
+    - 采样率转换
     """)
 
 # ==================== 3. 工具函数 ====================
 
 def init_session_state():
-    """初始化 session state，用于存储项目和语言选项"""
-    if 'projects' not in st.session_state:
-        st.session_state['projects'] = ['ZZ_NISSAN', 'DF_NISSAN', 'BYD', 'MaZda']
-    if 'languages' not in st.session_state:
-        st.session_state['languages'] = ['英语', '西班牙语', '阿拉伯语', '葡萄牙语', '瑞典语', '荷兰语', '意大利语',
-                                         '法语', '挪威语', '波兰语']
+    """初始化 session state"""
+    if 'test_cases' not in st.session_state:
+        st.session_state['test_cases'] = []
 
-# 初始化 session state
 init_session_state()
 
 def call_qwen_llm(system_prompt: str, user_prompt: str, model: str = "qwen-max"):
-    """
-    调用千问大模型（使用 OpenAI SDK）
-    """
+    """调用千问大模型"""
     if not api_key:
         return "❌ 错误：请先在侧边栏配置 API Key"
-
+    
     try:
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
         ]
-
+        
         response = client_qwen.chat.completions.create(
             model=model,
             messages=messages
         )
-
+        
         return response.choices[0].message.content
-
+    
     except Exception as e:
         return f"❌ 异常：{str(e)}"
 
-def generate_unique_id(lang: str, text: str, index: int = None) -> str:
-    """生成唯一 ID 用于去重"""
-    import hashlib
-    import time
-
-    combined = f"{str(lang).strip().lower()}_{str(text).strip().lower()}"
-
-    if index is not None:
-        combined += f"_{index}_{time.time()}"
-
-    return hashlib.md5(combined.encode('utf-8')).hexdigest()
-
 # ==================== 4. 主页面布局 ====================
 
-st.title("🚗 AI 语音语料智能处理平台")
+st.title(" AI智能测试与办公提效平台")
 st.markdown("---")
 
-# 创建四个功能模块标签页
-tab_upload, tab_design, tab_annotate, tab_analysis, tab_tools = st.tabs([
-    "📤 用例上传",
-    "✨ AI 设计",
-    "🪄 批量标注",
-    " 报告分析",
-    "🛠️ 工具箱"
+# 创建三个功能模块标签页
+tab_ai_test, tab_office, tab_audio = st.tabs([
+    " AI测试助手",
+    "️ 办公提效工具",
+    " 音频工具箱"
 ])
 
-# ==================== Tab 1: 用例上传 ====================
+# ==================== Tab 1: AI测试助手 ====================
 
-with tab_upload:
-    st.header("📤 用例上传")
-    st.info("上传 Excel 格式的语料文件，支持查看和下载")
-
-    # 上传 Excel 文件
-    uploaded_file = st.file_uploader(
-        "选择 Excel 文件 (.xlsx)",
-        type=["xlsx"],
-        help="Excel 文件应包含语料数据",
-        key="upload_file"
-    )
-
-    if uploaded_file:
-        try:
-            # 读取 Excel 预览
-            df_preview = pd.read_excel(uploaded_file)
-            
-            with st.expander(" 查看文件内容", expanded=True):
-                st.dataframe(df_preview.head(10))
-                st.write(f"✅ 成功读取 {len(df_preview)} 行数据")
-                st.write(f" 列名：{list(df_preview.columns)}")
-
-            st.divider()
-
-            # 下载按钮
-            st.subheader("💾 下载文件")
-            
-            output = BytesIO()
-            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                df_preview.to_excel(writer, index=False)
-
-            st.download_button(
-                label="📥 下载 Excel",
-                data=output.getvalue(),
-                file_name=f"processed_{uploaded_file.name}",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-
-        except Exception as e:
-            st.error(f"❌ 文件读取失败：{str(e)}")
-            import traceback
-            st.code(traceback.format_exc())
-
-# ==================== Tab 2: AI 设计 ====================
-
-with tab_design:
-    st.header("✨ AI 语料设计")
-    st.info("使用 AI 直接生成新语料，无需向量库")
-
-    # 基础配置
-    st.subheader("1️⃣ 基础配置")
-    col1, col2 = st.columns(2)
-
-    with col1:
-        selected_project = st.selectbox(
-            "📁 项目名称",
-            options=st.session_state.get('projects', ['默认项目']),
-            index=0
-        )
-
-    with col2:
-        selected_language = st.selectbox(
-            "🌐 语言",
-            options=st.session_state.get('languages', ['英语']),
-            index=0
-        )
-
-    st.divider()
-
-    # AI 生成指令
-    st.subheader("2️⃣ AI 生成指令")
+with tab_ai_test:
+    st.header(" AI测试助手")
+    st.info("利用AI大模型提升测试效率")
     
-    natural_query = st.text_area(
-        "请输入生成指令",
-        placeholder="""示例：
-- 设计 10 条西班牙语打开车窗的 case
-- 生成 15 条德语查询天气的语料，包含不同城市
-- 创建 20 条法语控制音乐播放的 case，要有音量调节
-        """,
-        height=150,
-        key="design_query_input"
+    ai_test_tool = st.radio(
+        "选择AI测试工具",
+        [" 测试用例生成", "🐛 Bug智能分析", " 测试报告生成"],
+        horizontal=True
     )
+    
+    # --- 1. 测试用例生成 ---
+    if ai_test_tool == " 测试用例生成":
+        st.subheader(" 测试用例生成")
+        
+        test_type = st.selectbox(
+            "测试类型",
+            ["功能测试", "接口测试", "UI测试", "性能测试"]
+        )
+        
+        requirement = st.text_area(
+            "输入需求描述",
+            placeholder="例如：用户登录功能，支持手机号和邮箱登录，密码需要包含大小写字母和数字...",
+            height=150
+        )
+        
+        if st.button(" 生成测试用例", type="primary"):
+            if not requirement:
+                st.warning("⚠️ 请输入需求描述")
+            else:
+                with st.spinner(" AI正在生成测试用例..."):
+                    prompt = f"""你是一个资深测试专家。请根据以下需求生成详细的测试用例。
 
-    quantity = st.slider("生成数量", min_value=5, max_value=50, value=10, step=5)
+【需求描述】:
+{requirement}
 
-    st.divider()
+【测试类型】: {test_type}
 
-    # 执行按钮
-    col_btn1, col_btn2 = st.columns([1, 4])
-    with col_btn1:
-        execute_btn = st.button("🚀 开始生成", type="primary", key="execute_design")
-    with col_btn2:
-        if st.button("🗑️ 清空结果", key="clear_design"):
-            if 'generated_cases' in st.session_state:
-                del st.session_state['generated_cases']
-            st.rerun()
+请生成结构化的测试用例，包含:
+1. 用例编号
+2. 用例标题
+3. 前置条件
+4. 测试步骤
+5. 预期结果
+6. 优先级(P0/P1/P2)
 
-    if execute_btn and natural_query:
-        with st.spinner("🤖 AI 正在生成语料..."):
-            try:
-                design_prompt = f"""你是一个车载语音语料设计专家。请生成符合以下要求的新语料。
-
-【生成要求】:
-- 主题：{natural_query}
-- 目标语言：{selected_language}
-- 目标项目：{selected_project}
-- 生成数量：{quantity}条
-
-【标注规范】:
-1. **Utterance 设计**:
-   - 生成自然、多样化的车载场景话术
-   - 避免重复，保持语言风格一致
-   - 语义要与主题相关，是连续的句子，不要含有逗号
-
-2. **Intent 标注**:
-   - 使用标准格式，如：settings_and_control:open:windows
-   - 保持意图名称的规范性
-
-3. **Slot 标注**:
-   - 格式：key=value（如 temperature=26）
-   - 多个slot用分号隔开
-   - 如果没有参数，保持为空字符串
-
-请以 JSON 数组格式返回：
+以JSON数组格式返回：
 [
   {{
-    "utterance": "打开主驾驶车窗",
-    "trans": "打开主驾驶侧的车窗",
-    "intent": "settings_and_control:open:windows",
-    "slot": "area=driver",
-    "language": "{selected_language}",
-    "project": "{selected_project}"
+    "id": "TC001",
+    "title": "用例标题",
+    "precondition": "前置条件",
+    "steps": ["步骤1", "步骤2"],
+    "expected": "预期结果",
+    "priority": "P0"
   }}
 ]
 """
-
-                generated_result = call_qwen_llm(
-                    system_prompt="你是一个专业的车载语音语料生成专家，只返回 JSON 数组。",
-                    user_prompt=design_prompt,
-                    model="qwen-max"
-                )
-
-                # 解析生成的结果
-                try:
-                    generated_cases = json.loads(generated_result)
-                    if isinstance(generated_cases, dict) and 'items' in generated_cases:
-                        generated_cases = generated_cases['items']
-                except Exception as e:
-                    st.error(f"❌ 结果解析失败：{generated_result}")
-                    generated_cases = []
-
-                # 保存到 session_state
-                st.session_state['generated_cases'] = generated_cases
-
-                # 显示结果
-                st.success(f"✅ AI 生成了 {len(generated_cases)} 条新语料！")
-
-                # 使用可编辑表格展示
-                if generated_cases:
-                    st.subheader("📝 AI 生成结果（可编辑）")
-                    st.info("💡 您可以直接点击表格修改字段")
-
-                    df_generated = pd.DataFrame(generated_cases)
-
-                    # 确保必要的列存在
-                    required_cols = ['utterance', 'trans', 'intent', 'slot', 'language', 'project']
-                    for col in required_cols:
-                        if col not in df_generated.columns:
-                            df_generated[col] = ''
-
-                    # 创建可编辑表格
-                    edited_df = st.data_editor(
-                        df_generated,
-                        use_container_width=True,
-                        num_rows="dynamic",
-                        column_config={
-                            "utterance": st.column_config.TextColumn("💬 话术", width="large"),
-                            "trans": st.column_config.TextColumn("📝 中文翻译"),
-                            "intent": st.column_config.TextColumn("🎯 意图"),
-                            "slot": st.column_config.TextColumn("🏷️ 槽位"),
-                            "language": st.column_config.TextColumn("🌐 语言", width="small"),
-                            "project": st.column_config.TextColumn(" 项目", width="small")
-                        },
-                        hide_index=True
+                    
+                    result = call_qwen_llm(
+                        system_prompt="你是一个专业的测试工程师，只返回JSON数据。",
+                        user_prompt=prompt,
+                        model="qwen-max"
                     )
-
-                    # 操作按钮
-                    st.divider()
-                    st.subheader("💾 导出")
-
-                    output = BytesIO()
-                    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                        edited_df.to_excel(writer, index=False)
-
-                    st.download_button(
-                        label="📥 下载 Excel",
-                        data=output.getvalue(),
-                        file_name=f"AI_Generated_Cases_{selected_language}.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    )
-
-                else:
-                    st.warning("⚠️ AI 未生成有效结果，请调整指令后重试")
-
-            except Exception as e:
-                st.error(f"❌ 处理失败：{str(e)}")
-                import traceback
-                st.code(traceback.format_exc())
-
-    elif execute_btn and not natural_query:
-        st.warning("⚠️ 请输入生成指令")
-
-# ==================== Tab 3: 批量标注 ====================
-
-with tab_annotate:
-    st.header("🪄 批量标注")
-    st.info("上传待标注 Excel，AI 自动识别意图和槽位")
-
-    # 上传文件
-    task_file = st.file_uploader(
-        "选择 Excel 文件 (.xlsx)",
-        type=["xlsx"],
-        help="Excel 文件应包含 Utterance 列",
-        key="annotate_upload"
-    )
-
-    if task_file:
-        try:
-            df_original = pd.read_excel(task_file)
-
-            with st.expander(" 查看文件内容", expanded=False):
-                st.dataframe(df_original.head(10))
-                st.write(f"✅ 成功读取 {len(df_original)} 行数据")
-
-            st.divider()
-
-            # 列名映射
-            st.subheader("1️⃣ 列名映射")
-            available_columns = list(df_original.columns)
-
-            annotate_utterance_col = st.selectbox(
-                "💬 Utterance 列",
-                options=available_columns,
-                help="需要标注的话术文本",
-                key="annotate_utterance_col"
-            )
-
-            st.divider()
-
-            # 开始标注
-            if st.button("🚀 开始 AI 标注", type="primary", key="start_annotate"):
-                if not annotate_utterance_col:
-                    st.error("❌ 请选择 Utterance 列")
-                else:
-                    with st.spinner("🤖 AI 正在批量标注..."):
-                        progress_bar = st.progress(0)
-                        status_text = st.empty()
-
-                        df_result = df_original.copy()
+                    
+                    try:
+                        test_cases = json.loads(result)
+                        if isinstance(test_cases, dict) and 'items' in test_cases:
+                            test_cases = test_cases['items']
                         
-                        # 初始化结果列
-                        intent_output_col = 'AI_Intent'
-                        slot_output_col = 'AI_Slot'
-                        df_result[intent_output_col] = ''
-                        df_result[slot_output_col] = ''
+                        st.session_state['test_cases'] = test_cases
+                        st.success(f"✅ 成功生成 {len(test_cases)} 条测试用例！")
+                        
+                        if test_cases:
+                            df = pd.DataFrame(test_cases)
+                            st.dataframe(df, use_container_width=True)
+                            
+                            # 导出Excel
+                            output = BytesIO()
+                            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                                df.to_excel(writer, index=False)
+                            
+                            st.download_button(
+                                label=" 下载测试用例Excel",
+                                data=output.getvalue(),
+                                file_name="test_cases.xlsx",
+                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                            )
+                    except Exception as e:
+                        st.error(f" 解析失败：{result}")
+    
+    # --- 2. Bug智能分析 ---
+    elif ai_test_tool == "🐛 Bug智能分析":
+        st.subheader("🐛 Bug智能分析")
+        
+        bug_title = st.text_input("Bug标题")
+        bug_description = st.text_area(
+            "Bug描述/日志",
+            placeholder="粘贴Bug描述、错误日志或堆栈信息...",
+            height=200
+        )
+        
+        if st.button("🐛 分析Bug", type="primary"):
+            if not bug_description:
+                st.warning("⚠️ 请输入Bug描述")
+            else:
+                with st.spinner("🤖 AI正在分析Bug..."):
+                    prompt = f"""你是一个资深开发工程师。请分析以下Bug信息。
 
-                        total_rows = len(df_result)
-                        success_count = 0
+【Bug标题】: {bug_title}
 
-                        for idx, row in df_result.iterrows():
-                            try:
-                                utterance = str(row.get(annotate_utterance_col, '')).strip()
+【Bug描述/日志】:
+{bug_description}
 
-                                if not utterance:
-                                    continue
+请分析并提供:
+1. **问题根因**: 分析可能的根本原因
+2. **影响范围**: 评估影响的功能模块
+3. **修复建议**: 提供具体的修复方案
+4. **优先级评估**: P0/P1/P2/P3
+5. **预防措施**: 如何避免类似问题
 
-                                # 调用 AI 标注
-                                annotation_prompt = f"""你是一个车载语音 NLU 标注专家。请为以下话术标注 Intent 和 Slot。
-
-【待标注话术】:
-{utterance}
-
-【标注规则】:
-1. **Intent**: 使用标准格式，如 settings_and_control:open:windows
-2. **Slot**: 格式 key=value（如 temperature=26），多个用分号隔开，没有则留空
-
-请以 JSON 格式返回：
-{{
-    "intent": "intent名称",
-    "slot": "slot信息"
-}}
+请以清晰的格式返回分析结果。
 """
+                    
+                    result = call_qwen_llm(
+                        system_prompt="你是一个专业的开发工程师，擅长Bug分析和定位。",
+                        user_prompt=prompt,
+                        model="qwen-max"
+                    )
+                    
+                    st.markdown("### 分析结果")
+                    st.markdown(result)
+    
+    # --- 3. 测试报告生成 ---
+    elif ai_test_tool == " 测试报告生成":
+        st.subheader(" 测试报告生成")
+        
+        project_name = st.text_input("项目名称")
+        test_summary = st.text_area(
+            "测试概况",
+            placeholder="例如：共执行100个用例，通过85个，失败15个，阻塞0个...",
+            height=100
+        )
+        
+        bug_list = st.text_area(
+            "Bug清单",
+            placeholder="例如：\nBUG-001: 登录页面无法提交 P0\nBUG-002: 首页加载慢 P1...",
+            height=150
+        )
+        
+        if st.button(" 生成测试报告", type="primary"):
+            if not test_summary:
+                st.warning("️ 请输入测试概况")
+            else:
+                with st.spinner(" AI正在生成测试报告..."):
+                    prompt = f"""你是一个测试经理。请根据以下信息生成专业的测试报告。
 
-                                llm_result = call_qwen_llm(
-                                    system_prompt="你是一个专业的语音标注专家，只返回 JSON 数据。",
-                                    user_prompt=annotation_prompt,
-                                    model="qwen-max"
-                                )
+【项目名称】: {project_name}
 
-                                try:
-                                    annotation_data = json.loads(llm_result)
-                                    ai_intent = annotation_data.get('intent', '')
-                                    ai_slot = annotation_data.get('slot', '')
-                                except:
-                                    ai_intent = '标注失败'
-                                    ai_slot = ''
+【测试概况】:
+{test_summary}
 
-                                df_result.at[idx, intent_output_col] = ai_intent
-                                df_result.at[idx, slot_output_col] = ai_slot
-                                success_count += 1
+【Bug清单】:
+{bug_list}
 
-                            except Exception as e:
-                                df_result.at[idx, intent_output_col] = f'ERROR'
+请生成结构化的测试报告，包含:
+1. 测试概述
+2. 测试执行统计
+3. 缺陷分析
+4. 风险评估
+5. 测试结论
+6. 建议与改进措施
 
-                            progress = min((idx + 1) / total_rows, 1.0)
-                            progress_bar.progress(progress)
-                            status_text.text(f"处理进度：{idx + 1}/{total_rows} | 成功：{success_count}")
+格式要求：使用Markdown格式，包含表格和图表说明。
+"""
+                    
+                    result = call_qwen_llm(
+                        system_prompt="你是一个专业的测试经理，擅长编写测试报告。",
+                        user_prompt=prompt,
+                        model="qwen-max"
+                    )
+                    
+                    st.markdown("### 测试报告")
+                    st.markdown(result)
+                    
+                    # 导出Markdown
+                    st.download_button(
+                        label=" 下载测试报告",
+                        data=result,
+                        file_name=f"{project_name}_test_report.md",
+                        mime="text/markdown"
+                    )
 
-                        progress_bar.empty()
-                        status_text.empty()
+# ==================== Tab 2: 办公提效工具 ====================
 
-                        st.success(f"✅ 标注完成！成功 {success_count}/{total_rows} 条")
-
-                        # 显示结果
-                        st.subheader(" 标注结果")
-                        st.dataframe(df_result, use_container_width=True)
-
-                        # 下载
-                        output = BytesIO()
-                        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                            df_result.to_excel(writer, index=False)
-
-                        st.download_button(
-                            label="📥 下载标注结果",
-                            data=output.getvalue(),
-                            file_name=f"AI_Annotated_{task_file.name}",
-                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                        )
-
-        except Exception as e:
-            st.error(f" 文件处理失败：{str(e)}")
-
-# ==================== Tab 4: 报告分析 ====================
-
-with tab_analysis:
-    st.header(" 数据统计分析")
-    st.info("上传 Excel 文件进行数据统计和可视化分析")
-
-    report_file = st.file_uploader(
-        "选择 Excel 文件 (.xlsx)",
-        type=["xlsx"],
-        key="report_upload"
-    )
-
-    if report_file:
-        try:
-            df_report = pd.read_excel(report_file)
-            
-            st.subheader("📊 数据概览")
-            st.write(f"总行数：{len(df_report)}")
-            st.write(f"总列数：{len(df_report.columns)}")
-            
-            st.divider()
-            
-            # 数值列统计
-            numeric_cols = df_report.select_dtypes(include=['number']).columns
-            if len(numeric_cols) > 0:
-                st.subheader("📈 数值列统计")
-                st.dataframe(df_report[numeric_cols].describe())
-            
-            st.divider()
-            
-            # 数据预览
-            st.subheader("📋 数据预览")
-            st.dataframe(df_report.head(20), use_container_width=True)
-            
-            # 下载
-            st.divider()
-            output = BytesIO()
-            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                df_report.to_excel(writer, index=False)
-            
-            st.download_button(
-                label=" 下载文件",
-                data=output.getvalue(),
-                file_name=f"analysis_{report_file.name}",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
-            
-        except Exception as e:
-            st.error(f"❌ 文件处理失败：{str(e)}")
-
-# ==================== Tab 5: 工具箱 ====================
-with tab_tools:
-    st.header("🛠️ 常用工具集")
-    tool_type = st.radio(
-        "选择工具类型",
-        ["🧹 Excel 数据清洗", "🎵 音频格式转换 (M4A->WAV)", "📻 音频格式转换 (WAV->PCM)", "💿 音频格式转换 (PCM->WAV)", "📉 音频采样率转换 (48K->16K)", "🕳️ 测试 GAP 分析"],
+with tab_office:
+    st.header("️ 办公提效工具")
+    st.info("日常办公高频需求，一键解决")
+    
+    office_tool = st.radio(
+        "选择办公工具",
+        [" 文件格式转换", " 数据处理", "📝 文本处理", " 编码解码"],
         horizontal=True
     )
-
-    # --- 1. Excel 数据清洗 ---
-    if tool_type == "🧹 Excel 数据清洗":
-        st.subheader("🧹 Excel 语料数据清洗")
-        st.info("从全功能清单中提取 Case ID、ASR 和中文翻译")
+    
+    # --- 1. 文件格式转换 ---
+    if office_tool == " 文件格式转换":
+        st.subheader(" 文件格式转换")
         
-        cleaning_file = st.file_uploader("上传 Excel 文件 (.xlsx)", type=["xlsx"], key="cleaning_upload")
-        if cleaning_file:
-            if st.button("开始清洗", key="start_cleaning_btn"):
-                with st.spinner("正在处理..."):
-                    try:
-                        df = pd.read_excel(cleaning_file, sheet_name='全功能清单', engine='openpyxl')
-                        cols_map = {23: 'ENU', 26: 'SPM', 29: 'PTB', 32: 'ARG'}
-                        results = {lang: [] for lang in cols_map.values()}
+        convert_type = st.selectbox(
+            "转换类型",
+            ["Excel → CSV", "CSV → Excel", "JSON 格式化", "XML 格式化"]
+        )
+        
+        if convert_type == "Excel → CSV":
+            excel_file = st.file_uploader("上传Excel文件", type=["xlsx"], key="excel_to_csv")
+            if excel_file:
+                if st.button("开始转换", key="convert_excel_csv"):
+                    df = pd.read_excel(excel_file)
+                    csv_output = df.to_csv(index=False, encoding='utf-8-sig')
+                    st.download_button(
+                        label=" 下载CSV文件",
+                        data=csv_output,
+                        file_name=f"{excel_file.name.replace('.xlsx', '.csv')}",
+                        mime="text/csv"
+                    )
+                    st.success("✅ 转换完成！")
+        
+        elif convert_type == "CSV → Excel":
+            csv_file = st.file_uploader("上传CSV文件", type=["csv"], key="csv_to_excel")
+            if csv_file:
+                if st.button("开始转换", key="convert_csv_excel"):
+                    df = pd.read_csv(csv_file, encoding='utf-8-sig')
+                    output = BytesIO()
+                    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                        df.to_excel(writer, index=False)
+                    st.download_button(
+                        label=" 下载Excel文件",
+                        data=output.getvalue(),
+                        file_name=f"{csv_file.name.replace('.csv', '.xlsx')}",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+                    st.success("✅ 转换完成！")
+        
+        elif convert_type == "JSON 格式化":
+            json_input = st.text_area("输入JSON", height=200)
+            if json_input and st.button("格式化", key="format_json"):
+                try:
+                    json_obj = json.loads(json_input)
+                    formatted = json.dumps(json_obj, indent=2, ensure_ascii=False)
+                    st.code(formatted, language="json")
+                    st.download_button(
+                        label=" 下载格式化JSON",
+                        data=formatted,
+                        file_name="formatted.json",
+                        mime="application/json"
+                    )
+                    st.success("✅ 格式化成功！")
+                except Exception as e:
+                    st.error(f"❌ JSON格式错误：{str(e)}")
+        
+        elif convert_type == "XML 格式化":
+            xml_input = st.text_area("输入XML", height=200)
+            if xml_input and st.button("格式化", key="format_xml"):
+                try:
+                    import xml.dom.minidom
+                    dom = xml.dom.minidom.parseString(xml_input)
+                    formatted = dom.toprettyxml(indent="  ")
+                    st.code(formatted, language="xml")
+                    st.download_button(
+                        label=" 下载格式化XML",
+                        data=formatted,
+                        file_name="formatted.xml",
+                        mime="application/xml"
+                    )
+                    st.success("✅ 格式化成功！")
+                except Exception as e:
+                    st.error(f"❌ XML格式错误：{str(e)}")
+    
+    # --- 2. 数据处理 ---
+    elif office_tool == " 数据处理":
+        st.subheader(" 数据处理")
+        
+        data_tool = st.selectbox(
+            "数据处理功能",
+            ["Excel多表合并", "数据去重对比", "批量替换"]
+        )
+        
+        if data_tool == "Excel多表合并":
+            st.info("上传多个Excel文件，合并为一个文件")
+            excel_files = st.file_uploader(
+                "上传Excel文件", 
+                type=["xlsx"], 
+                accept_multiple_files=True,
+                key="merge_excel"
+            )
+            if excel_files and len(excel_files) > 1:
+                if st.button("开始合并", key="start_merge"):
+                    merged_df = pd.DataFrame()
+                    for file in excel_files:
+                        df = pd.read_excel(file)
+                        df['来源文件'] = file.name
+                        merged_df = pd.concat([merged_df, df], ignore_index=True)
+                    
+                    output = BytesIO()
+                    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                        merged_df.to_excel(writer, index=False)
+                    
+                    st.download_button(
+                        label=" 下载合并结果",
+                        data=output.getvalue(),
+                        file_name="merged_result.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+                    st.success(f"✅ 成功合并 {len(excel_files)} 个文件，共 {len(merged_df)} 行数据！")
+        
+        elif data_tool == "数据去重对比":
+            st.info("上传两个Excel文件，对比差异")
+            col_f1, col_f2 = st.columns(2)
+            with col_f1:
+                file1 = st.file_uploader("文件1", type=["xlsx"], key="compare_file1")
+            with col_f2:
+                file2 = st.file_uploader("文件2", type=["xlsx"], key="compare_file2")
+            
+            if file1 and file2:
+                if st.button("开始对比", key="start_compare"):
+                    df1 = pd.read_excel(file1)
+                    df2 = pd.read_excel(file2)
+                    
+                    # 查找差异
+                    only_in_1 = pd.merge(df1, df2, how='left', indicator=True)
+                    only_in_1 = only_in_1[only_in_1['_merge'] == 'left_only']
+                    
+                    only_in_2 = pd.merge(df2, df1, how='left', indicator=True)
+                    only_in_2 = only_in_2[only_in_2['_merge'] == 'left_only']
+                    
+                    st.markdown(f"### 对比结果")
+                    st.write(f"📊 文件1独有数据：{len(only_in_1)} 行")
+                    st.write(f" 文件2独有数据：{len(only_in_2)} 行")
+                    
+                    # 导出差异
+                    output = BytesIO()
+                    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                        if len(only_in_1) > 0:
+                            only_in_1.to_excel(writer, sheet_name='仅在文件1', index=False)
+                        if len(only_in_2) > 0:
+                            only_in_2.to_excel(writer, sheet_name='仅在文件2', index=False)
+                    
+                    st.download_button(
+                        label=" 下载对比结果",
+                        data=output.getvalue(),
+                        file_name="compare_result.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+        
+        elif data_tool == "批量替换":
+            st.info("在Excel中批量替换文本")
+            replace_file = st.file_uploader("上传Excel文件", type=["xlsx"], key="replace_file")
+            if replace_file:
+                col_old, col_new = st.columns(2)
+                with col_old:
+                    old_text = st.text_input("查找内容")
+                with col_new:
+                    new_text = st.text_input("替换为")
+                
+                if old_text and new_text and st.button("开始替换", key="start_replace"):
+                    df = pd.read_excel(replace_file)
+                    df_replaced = df.replace(old_text, new_text, regex=True)
+                    
+                    output = BytesIO()
+                    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                        df_replaced.to_excel(writer, index=False)
+                    
+                    st.download_button(
+                        label=" 下载替换结果",
+                        data=output.getvalue(),
+                        file_name="replaced_result.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+                    st.success("✅ 替换完成！")
+    
+    # --- 3. 文本处理 ---
+    elif office_tool == "📝 文本处理":
+        st.subheader("📝 文本处理")
+        
+        text_tool = st.selectbox(
+            "文本处理功能",
+            ["批量查找替换", "文本去重", "文本排序", "正则表达式测试"]
+        )
+        
+        if text_tool == "批量查找替换":
+            text_input = st.text_area("输入文本", height=200)
+            col_f, col_r = st.columns(2)
+            with col_f:
+                find_text = st.text_input("查找")
+            with col_r:
+                replace_text = st.text_input("替换为")
+            
+            if text_input and find_text and st.button("替换", key="text_replace"):
+                result = text_input.replace(find_text, replace_text)
+                st.text_area("结果", value=result, height=200)
+                st.download_button(
+                    label=" 下载结果",
+                    data=result,
+                    file_name="replaced.txt",
+                    mime="text/plain"
+                )
+        
+        elif text_tool == "文本去重":
+            text_input = st.text_area("输入文本(每行一条)", height=200)
+            if text_input and st.button("去重", key="text_deduplicate"):
+                lines = text_input.split('\n')
+                unique_lines = list(dict.fromkeys(lines))  # 保持顺序去重
+                result = '\n'.join(unique_lines)
+                st.text_area(f"结果(去重前:{len(lines)}行, 去重后:{len(unique_lines)}行)", 
+                            value=result, height=200)
+        
+        elif text_tool == "文本排序":
+            text_input = st.text_area("输入文本(每行一条)", height=200)
+            sort_type = st.radio("排序方式", ["升序", "降序"])
+            if text_input and st.button("排序", key="text_sort"):
+                lines = text_input.split('\n')
+                lines = [l for l in lines if l.strip()]  # 移除空行
+                lines.sort(reverse=(sort_type == "降序"))
+                result = '\n'.join(lines)
+                st.text_area("排序结果", value=result, height=200)
+        
+        elif text_tool == "正则表达式测试":
+            st.info("测试正则表达式匹配")
+            pattern = st.text_input("正则表达式", placeholder="例如：\\d+ 匹配数字")
+            text_input = st.text_area("测试文本", height=150)
+            
+            if pattern and text_input and st.button("测试匹配", key="test_regex"):
+                try:
+                    matches = re.findall(pattern, text_input)
+                    st.success(f"✅ 找到 {len(matches)} 个匹配")
+                    if matches:
+                        for i, match in enumerate(matches, 1):
+                            st.write(f"{i}. {match}")
+                except Exception as e:
+                    st.error(f"❌ 正则表达式错误：{str(e)}")
+    
+    # --- 4. 编码解码 ---
+    elif office_tool == "🔐 编码解码":
+        st.subheader("🔐 编码解码")
+        
+        encode_tool = st.selectbox(
+            "编解码功能",
+            ["Base64 编码", "Base64 解码", "URL 编码", "URL 解码", "MD5 加密", "SHA256 加密"]
+        )
+        
+        text_input = st.text_area("输入文本", height=150)
+        
+        if text_input:
+            if encode_tool == "Base64 编码":
+                result = base64.b64encode(text_input.encode()).decode()
+                st.code(result)
+                st.download_button(" 下载结果", data=result, file_name="base64.txt")
+            
+            elif encode_tool == "Base64 解码":
+                try:
+                    result = base64.b64decode(text_input).decode()
+                    st.code(result)
+                except Exception as e:
+                    st.error(f"❌ 解码失败：{str(e)}")
+            
+            elif encode_tool == "URL 编码":
+                from urllib.parse import quote
+                result = quote(text_input)
+                st.code(result)
+            
+            elif encode_tool == "URL 解码":
+                from urllib.parse import unquote
+                result = unquote(text_input)
+                st.code(result)
+            
+            elif encode_tool == "MD5 加密":
+                result = hashlib.md5(text_input.encode()).hexdigest()
+                st.code(result)
+            
+            elif encode_tool == "SHA256 加密":
+                result = hashlib.sha256(text_input.encode()).hexdigest()
+                st.code(result)
 
-                        def is_chinese(text):
-                            return len(re.findall(r'[\u4e00-\u9fa5]', str(text))) > 0
+# ==================== Tab 3: 音频工具箱 ====================
 
-                        for index, row in df.iterrows():
-                            req_id = str(row.iloc[5]).strip() if not pd.isna(row.iloc[5]) else ""
-                            for col_idx, lang in cols_map.items():
-                                cell_data = row.iloc[col_idx]
-                                if pd.isna(cell_data) or str(cell_data).strip() == "": continue
-                                lines = str(cell_data).split('\n')
-                                for line in lines:
-                                    line = line.strip()
-                                    if not line or line.lower().startswith('cases:'): continue
-                                    first_comma = re.search(r'[,，]', line)
-                                    if not first_comma: continue
-                                    case_id = line[:first_comma.start()].strip()
-                                    rest_of_line = line[first_comma.end():].strip()
-                                    parts = [p.strip() for p in re.split(r'[,，]', rest_of_line) if p.strip()]
-                                    asr_content = ""
-                                    zh_translation = ""
-                                    found_zh = False
-                                    for i, part in enumerate(parts):
-                                        if is_chinese(part):
-                                            zh_translation = part
-                                            asr_content = ", ".join(parts[:i])
-                                            found_zh = True
-                                            break
-                                    if found_zh and asr_content:
-                                        results[lang].append({'req_id': req_id, 'case_id': case_id, 'asr': asr_content, 'zh_translation': zh_translation})
-
-                        output = BytesIO()
-                        
-                        # 创建新的 Excel workbook
-                        wb = Workbook()
-                        
-                        # 添加各个语言sheet
-                        for lang, data in results.items():
-                            if data:
-                                ws = wb.create_sheet(title=lang)
-                                # 添加表头
-                                headers = ['req_id', 'case_id', 'asr', 'zh_translation']
-                                ws.append(headers)
-                                # 设置表头样式
-                                for cell in ws[1]:
-                                    cell.font = Font(bold=True)
-                                # 添加数据
-                                for item in data:
-                                    ws.append([item['req_id'], item['case_id'], item['asr'], item['zh_translation']])
-                                # 自动筛选
-                                ws.auto_filter.ref = ws.dimensions
-                                # 调整列宽
-                                for col_idx, col_name in enumerate(['req_id', 'case_id', 'asr', 'zh_translation'], 1):
-                                    ws.column_dimensions[get_column_letter(col_idx)].width = 30
-                        
-                        # 添加"数据确认"sheet
-                        if any(results.values()):
-                            ws_confirm = wb.create_sheet(title="数据确认", index=0)
-                            ws_confirm.append(['语言', '数据条数'])
-                            for lang, data in results.items():
-                                if data:
-                                    ws_confirm.append([lang, len(data)])
-                            ws_confirm.column_dimensions['A'].width = 20
-                            ws_confirm.column_dimensions['B'].width = 15
-                        
-                        # 删除默认的Sheet
-                        if 'Sheet' in wb.sheetnames:
-                            del wb['Sheet']
-                        
-                        # 保存到 BytesIO
-                        wb.save(output)
-                        
-                        st.success("✅ 清洗完成！")
-                        st.download_button(" 下载结果", data=output.getvalue(), file_name="cleaned_result.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-                    except Exception as e:
-                        st.error(f"❌ 处理失败: {str(e)}")
-
-    # --- 2. M4A to WAV ---
-    elif tool_type == "🎵 音频格式转换 (M4A->WAV)":
-        st.subheader("🎵 M4A 转 WAV")
+with tab_audio:
+    st.header(" 音频工具箱")
+    st.info("音频格式转换与处理")
+    
+    audio_tool = st.radio(
+        "选择音频工具",
+        [" M4A → WAV", " WAV → PCM", "💿 PCM → WAV", "📉 48K → 16K"],
+        horizontal=True
+    )
+    
+    # --- 1. M4A to WAV ---
+    if audio_tool == "🎵 M4A → WAV":
+        st.subheader(" M4A 转 WAV")
         m4a_files = st.file_uploader("上传 M4A 文件", type=["m4a"], accept_multiple_files=True, key="m4a_upload")
         if m4a_files:
             if st.button("开始转换", key="convert_m4a_btn"):
@@ -651,7 +642,8 @@ with tab_tools:
                 for i, m4a_file in enumerate(m4a_files):
                     input_path = f"temp_{m4a_file.name}"
                     output_path = os.path.splitext(input_path)[0] + ".wav"
-                    with open(input_path, "wb") as f: f.write(m4a_file.getbuffer())
+                    with open(input_path, "wb") as f:
+                        f.write(m4a_file.getbuffer())
                     
                     command = ['ffmpeg', '-i', input_path, '-acodec', 'pcm_s16le', '-ar', '44100', '-y', output_path]
                     try:
@@ -660,7 +652,8 @@ with tab_tools:
                     except Exception as e:
                         st.error(f"转换 {m4a_file.name} 失败: {e}")
                     finally:
-                        if os.path.exists(input_path): os.remove(input_path)
+                        if os.path.exists(input_path):
+                            os.remove(input_path)
                     progress_bar.progress((i + 1) / len(m4a_files))
                 
                 if converted_files:
@@ -672,14 +665,14 @@ with tab_tools:
                             os.remove(fpath)
                     
                     st.download_button(
-                        label="📥 下载全部结果 (ZIP)",
+                        label=" 下载全部结果 (ZIP)",
                         data=zip_buffer.getvalue(),
                         file_name="converted_wav_files.zip",
                         mime="application/zip"
                     )
-
-    # --- 3. WAV to PCM ---
-    elif tool_type == "📻 音频格式转换 (WAV->PCM)":
+    
+    # --- 2. WAV to PCM ---
+    elif audio_tool == " WAV → PCM":
         st.subheader("📻 WAV 转 PCM (16k/1ch/16bit)")
         wav_files = st.file_uploader("上传 WAV 文件", type=["wav"], accept_multiple_files=True, key="wav_upload")
         if wav_files:
@@ -687,7 +680,8 @@ with tab_tools:
                 converted_files = []
                 for wav_file in wav_files:
                     wav_path = f"temp_{wav_file.name}"
-                    with open(wav_path, "wb") as f: f.write(wav_file.getbuffer())
+                    with open(wav_path, "wb") as f:
+                        f.write(wav_file.getbuffer())
                     try:
                         with wave.open(wav_path, 'rb') as wf:
                             if wf.getframerate() != 16000 or wf.getnchannels() != 1 or wf.getsampwidth() != 2:
@@ -699,7 +693,8 @@ with tab_tools:
                     except Exception as e:
                         st.error(f"处理 {wav_file.name} 失败: {e}")
                     finally:
-                        if os.path.exists(wav_path): os.remove(wav_path)
+                        if os.path.exists(wav_path):
+                            os.remove(wav_path)
                 
                 if converted_files:
                     st.success(f"✅ 成功转换 {len(converted_files)} 个文件")
@@ -709,14 +704,14 @@ with tab_tools:
                             zip_file.writestr(fname, fdata)
                     
                     st.download_button(
-                        label="📥 下载全部结果 (ZIP)",
+                        label=" 下载全部结果 (ZIP)",
                         data=zip_buffer.getvalue(),
                         file_name="converted_pcm_files.zip",
                         mime="application/zip"
                     )
-
-    # --- 4. PCM to WAV ---
-    elif tool_type == "💿 音频格式转换 (PCM->WAV)":
+    
+    # --- 3. PCM to WAV ---
+    elif audio_tool == "💿 PCM → WAV":
         st.subheader("💿 PCM 转 WAV")
         st.info("将原始 PCM 音频数据封装为标准的 WAV 格式")
         
@@ -733,7 +728,8 @@ with tab_tools:
                 converted_files = []
                 for pcm_file in pcm_files:
                     pcm_path = f"temp_{pcm_file.name}"
-                    with open(pcm_path, "wb") as f: f.write(pcm_file.getbuffer())
+                    with open(pcm_path, "wb") as f:
+                        f.write(pcm_file.getbuffer())
                     try:
                         wav_filename = os.path.splitext(pcm_file.name)[0] + ".wav"
                         wav_path = f"temp_{wav_filename}"
@@ -749,7 +745,8 @@ with tab_tools:
                     except Exception as e:
                         st.error(f"处理 {pcm_file.name} 失败: {e}")
                     finally:
-                        if os.path.exists(pcm_path): os.remove(pcm_path)
+                        if os.path.exists(pcm_path):
+                            os.remove(pcm_path)
                 
                 if converted_files:
                     st.success(f"✅ 成功转换 {len(converted_files)} 个文件")
@@ -760,15 +757,15 @@ with tab_tools:
                             os.remove(fpath)
                     
                     st.download_button(
-                        label="📥 下载全部结果 (ZIP)",
+                        label=" 下载全部结果 (ZIP)",
                         data=zip_buffer.getvalue(),
                         file_name="converted_wav_from_pcm.zip",
                         mime="application/zip"
                     )
-
-    # --- 5. 48K to 16K ---
-    elif tool_type == "📉 音频采样率转换 (48K->16K)":
-        st.subheader("📉 音频采样率转换 (48K -> 16K)")
+    
+    # --- 4. 48K to 16K ---
+    elif audio_tool == "📉 48K → 16K":
+        st.subheader("📉 音频采样率转换 (48K → 16K)")
         
         audio_files_48k = st.file_uploader("上传音频文件", type=["wav", "m4a", "mp3"], accept_multiple_files=True, key="resample_upload")
         if audio_files_48k:
@@ -780,7 +777,8 @@ with tab_tools:
                     output_filename = f"16k_{os.path.splitext(audio_file.name)[0]}.wav"
                     output_path = f"temp_{output_filename}"
                     
-                    with open(input_path, "wb") as f: f.write(audio_file.getbuffer())
+                    with open(input_path, "wb") as f:
+                        f.write(audio_file.getbuffer())
                     
                     command = ['ffmpeg', '-i', input_path, '-ar', '16000', '-ac', '1', '-y', output_path]
                     try:
@@ -789,7 +787,8 @@ with tab_tools:
                     except Exception as e:
                         st.error(f"转换 {audio_file.name} 失败: {e}")
                     finally:
-                        if os.path.exists(input_path): os.remove(input_path)
+                        if os.path.exists(input_path):
+                            os.remove(input_path)
                     progress_bar.progress((i + 1) / len(audio_files_48k))
                 
                 if converted_files:
@@ -801,66 +800,13 @@ with tab_tools:
                             os.remove(fpath)
                     
                     st.download_button(
-                        label="📥 下载全部结果 (ZIP)",
+                        label=" 下载全部结果 (ZIP)",
                         data=zip_buffer.getvalue(),
                         file_name="resampled_16k_files.zip",
                         mime="application/zip"
                     )
 
-    # --- 6. GAP Analysis ---
-    elif tool_type == "🕳️ 测试 GAP 分析":
-        st.subheader("🕳️ 测试报告 GAP 分析")
-        st.info("对比测试报告与优先级清单，找出缺失的 Req ID")
-        
-        col_g1, col_g2 = st.columns(2)
-        with col_g1:
-            report_file_gap = st.file_uploader("上传测试报告", type=["xlsx"], key="gap_report")
-        with col_g2:
-            priority_file_gap = st.file_uploader("上传优先级清单", type=["xlsx"], key="gap_priority")
-        
-        priorities = st.multiselect("选择 Priority", ['P0', 'P1', 'P2', 'P4'], default=['P0', 'P1'])
-        min_pass = st.number_input("最小 Pass 数量", min_value=1, value=1)
-        
-        if report_file_gap and priority_file_gap:
-            if st.button("开始分析 GAP", key="analyze_gap_btn"):
-                with st.spinner("正在分析..."):
-                    try:
-                        report_df = pd.read_excel(report_file_gap, sheet_name='All', skiprows=1)
-                        priority_df = pd.read_excel(priority_file_gap, sheet_name='ReqID VS P0,1,2,4', skiprows=2)
-                        
-                        target_req_ids = set()
-                        for priority in priorities:
-                            filtered_reqs = priority_df[priority_df.iloc[:, 3] == priority].iloc[:, 2]
-                            target_req_ids.update(filtered_reqs.dropna().astype(str))
-                        
-                        req_pass_counts = {}
-                        for idx, row in report_df.iterrows():
-                            req_id = str(row.iloc[0])
-                            final_res = row.iloc[16]
-                            if req_id in target_req_ids:
-                                if req_id not in req_pass_counts: req_pass_counts[req_id] = 0
-                                if final_res == 'P': req_pass_counts[req_id] += 1
-                        
-                        missing_req_ids = [rid for rid in target_req_ids if rid not in req_pass_counts]
-                        insufficient_req_ids = [(rid, cnt) for rid, cnt in req_pass_counts.items() if cnt < min_pass]
-                        
-                        st.markdown("### 📊 分析结果")
-                        if missing_req_ids:
-                            st.markdown("**需要补充的 req_id:**")
-                            st.code("\n".join(sorted(missing_req_ids)))
-                        else:
-                            st.success("所有目标 req_id 在报告中都有对应的 case")
-                        
-                        if insufficient_req_ids:
-                            st.markdown(f"**不满足最小 Pass 数量 ({min_pass}个):**")
-                            df_insuf = pd.DataFrame(insufficient_req_ids, columns=['Req ID', 'Pass Count'])
-                            st.dataframe(df_insuf.sort_values(by='Req ID'))
-                        else:
-                            st.success(f"所有目标 req_id 都满足最小 Pass 数量 ({min_pass}个)")
-                    except Exception as e:
-                        st.error(f"❌ 分析失败: {str(e)}")
-
 # ==================== 底部信息 ====================
 
 st.markdown("---")
-st.caption("Powered by Streamlit + 千问大模型 | Version 2.0")
+st.caption("Powered by Streamlit + 千问大模型 | Version 3.0 - AI智能测试与办公提效平台")
