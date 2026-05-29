@@ -365,6 +365,7 @@ elif audio_tool == "✂️ PCM 裁剪器(含播放)":
         duration = len(pcm_array) / sample_rate
         
         st.info(f" 音频时长: {duration:.2f} 秒")
+        st.caption(" 提示:波形图横坐标即为时间(秒),手动输入的时间应对应图中的坐标值")
         
         # 播放功能
         st.subheader("🎧 播放音频")
@@ -418,11 +419,26 @@ elif audio_tool == "✂️ PCM 裁剪器(含播放)":
         plt.close()
         
         # 裁剪控制 - 交互式选择
-        st.subheader("✂️ 裁剪设置")
-        st.info("💡 在波形图上点击两个位置来选择要**删除**的区域:")
-        st.markdown("- **第1次点击**: 设置删除区域起点")
-        st.markdown("- **第2次点击**: 设置删除区域终点")
-        st.markdown("- 中间区域将被删除,两侧音频会自动拼接")
+        st.subheader("️ 裁剪设置")
+                
+        # 选择裁剪模式
+        cut_mode = st.radio(
+            "选择裁剪模式:",
+            ["🗑️ 删除中间区域(保留两边)", "✂️ 只保留中间区域(删除两边)"],
+            horizontal=True,
+            key="cut_mode_radio"
+        )
+                
+        if cut_mode == "🗑️ 删除中间区域(保留两边)":
+            st.info(" 在波形图上点击两个位置来选择要**删除**的区域:")
+            st.markdown("- **第1次点击**: 设置删除区域起点")
+            st.markdown("- **第2次点击**: 设置删除区域终点")
+            st.markdown("- 中间区域将被删除,两侧音频会自动拼接")
+        else:
+            st.info("💡 在波形图上点击两个位置来选择要**保留**的区域:")
+            st.markdown("- **第1次点击**: 设置保留区域起点")
+            st.markdown("- **第2次点击**: 设置保留区域终点")
+            st.markdown("- 只保留中间区域,两侧音频将被删除")
         
         # 初始化 session state
         if 'click_count' not in st.session_state:
@@ -439,22 +455,42 @@ elif audio_tool == "✂️ PCM 裁剪器(含播放)":
                 st.rerun()
         
         with col_info:
-            if st.session_state.click_count == 0:
-                st.info("⏳ 请在波形图区域点击选择删除起点")
-            elif st.session_state.click_count == 1:
-                st.info(f"✅ 已选择起点: {st.session_state.click_points[0]:.2f}秒 | 请点击选择终点")
+            if cut_mode == "🗑️ 删除中间区域(保留两边)":
+                # 删除模式
+                if st.session_state.click_count == 0:
+                    st.info("⏳ 请在波形图区域点击选择删除起点")
+                elif st.session_state.click_count == 1:
+                    st.info(f"✅ 已选择起点: {st.session_state.click_points[0]:.2f}秒 | 请点击选择终点")
+                else:
+                    start_del = st.session_state.click_points[0]
+                    end_del = st.session_state.click_points[1]
+                    if start_del > end_del:
+                        start_del, end_del = end_del, start_del
+                    
+                    # 计算保留区域
+                    keep_start_to_start = start_del
+                    keep_end_to_end = duration - end_del
+                    
+                    st.success(f"✅ 将删除: {start_del:.2f}s - {end_del:.2f}s (删除时长: {end_del - start_del:.2f}s)")
+                    st.info(f"📊 保留: 0-{start_del:.2f}s + {end_del:.2f}s-{duration:.2f}s (总时长: {keep_start_to_start + keep_end_to_end:.2f}s)")
             else:
-                start_del = st.session_state.click_points[0]
-                end_del = st.session_state.click_points[1]
-                if start_del > end_del:
-                    start_del, end_del = end_del, start_del
-                
-                # 计算保留区域
-                keep_start_to_start = start_del
-                keep_end_to_end = duration - end_del
-                
-                st.success(f"✅ 将删除: {start_del:.2f}s - {end_del:.2f}s (删除时长: {end_del - start_del:.2f}s)")
-                st.info(f"📊 保留: 0-{start_del:.2f}s + {end_del:.2f}s-{duration:.2f}s (总时长: {keep_start_to_start + keep_end_to_end:.2f}s)")
+                # 保留模式
+                if st.session_state.click_count == 0:
+                    st.info("⏳ 请在波形图区域点击选择保留起点")
+                elif st.session_state.click_count == 1:
+                    st.info(f"✅ 已选择起点: {st.session_state.click_points[0]:.2f}秒 | 请点击选择终点")
+                else:
+                    start_keep = st.session_state.click_points[0]
+                    end_keep = st.session_state.click_points[1]
+                    if start_keep > end_keep:
+                        start_keep, end_keep = end_keep, start_keep
+                    
+                    # 计算删除区域
+                    delete_start_to_start = start_keep
+                    delete_end_to_end = duration - end_keep
+                    
+                    st.success(f"✅ 将保留: {start_keep:.2f}s - {end_keep:.2f}s (保留时长: {end_keep - start_keep:.2f}s)")
+                    st.info(f" 删除: 0-{start_keep:.2f}s + {end_keep:.2f}s-{duration:.2f}s (总删除时长: {delete_start_to_start + delete_end_to_end:.2f}s)")
         
         # 显示交互式波形图(带点击功能)
         st.subheader("📊 波形图 - 点击选择删除区域")
@@ -471,14 +507,22 @@ elif audio_tool == "✂️ PCM 裁剪器(含播放)":
         # 如果已经选择了点,绘制标记
         if len(st.session_state.click_points) >= 1:
             point1 = st.session_state.click_points[0]
-            ax.axvline(x=point1, color='red', linestyle='--', linewidth=2, label=f'起点: {point1:.2f}s')
+            if cut_mode == "🗑️ 删除中间区域(保留两边)":
+                ax.axvline(x=point1, color='red', linestyle='--', linewidth=2, label=f'删除起点: {point1:.2f}s')
+            else:
+                ax.axvline(x=point1, color='green', linestyle='--', linewidth=2, label=f'保留起点: {point1:.2f}s')
         
         if len(st.session_state.click_points) >= 2:
             point1 = min(st.session_state.click_points)
             point2 = max(st.session_state.click_points)
-            ax.axvline(x=point2, color='orange', linestyle='--', linewidth=2, label=f'终点: {point2:.2f}s')
-            # 高亮要删除的区域
-            ax.axvspan(point1, point2, alpha=0.3, color='red', label='将删除此区域')
+            if cut_mode == "🗑️ 删除中间区域(保留两边)":
+                ax.axvline(x=point2, color='orange', linestyle='--', linewidth=2, label=f'删除终点: {point2:.2f}s')
+                # 高亮要删除的区域
+                ax.axvspan(point1, point2, alpha=0.3, color='red', label='将删除此区域')
+            else:
+                ax.axvline(x=point2, color='lightgreen', linestyle='--', linewidth=2, label=f'保留终点: {point2:.2f}s')
+                # 高亮要保留的区域
+                ax.axvspan(point1, point2, alpha=0.3, color='green', label='将保留此区域')
             ax.legend(loc='upper right')
         
         plt.tight_layout()
@@ -505,13 +549,18 @@ elif audio_tool == "✂️ PCM 裁剪器(含播放)":
         
         # 由于 Streamlit 不支持直接的图形点击,我们使用时间输入作为备选
         st.divider()
-        st.subheader("️ 精确时间输入(可选)")
+        st.subheader(" 精确时间输入(可选)")
         st.caption("如果上面的点击方式不够精确,可以手动输入时间")
-        
+                
         col1, col2 = st.columns(2)
         with col1:
+            if cut_mode == "🗑️ 删除中间区域(保留两边)":
+                label1 = "删除起点 (秒)"
+            else:
+                label1 = "保留起点 (秒)"
+                    
             delete_start = st.number_input(
-                "删除起点 (秒)",
+                label1,
                 min_value=0.0,
                 max_value=duration,
                 value=st.session_state.click_points[0] if len(st.session_state.click_points) > 0 else 0.0,
@@ -520,8 +569,13 @@ elif audio_tool == "✂️ PCM 裁剪器(含播放)":
                 key="delete_start_input"
             )
         with col2:
+            if cut_mode == "🗑️ 删除中间区域(保留两边)":
+                label2 = "删除终点 (秒)"
+            else:
+                label2 = "保留终点 (秒)"
+                    
             delete_end = st.number_input(
-                "删除终点 (秒)",
+                label2,
                 min_value=0.0,
                 max_value=duration,
                 value=st.session_state.click_points[1] if len(st.session_state.click_points) > 1 else duration,
@@ -532,26 +586,54 @@ elif audio_tool == "✂️ PCM 裁剪器(含播放)":
         
         # 验证并执行裁剪
         if delete_start >= delete_end:
-            st.warning("⚠️ 删除起点必须小于终点")
+            st.warning("⚠️ 起点必须小于终点")
         else:
-            st.success(f"✅ 将删除区间: {delete_start:.2f}s - {delete_end:.2f}s")
+            if cut_mode == "🗑️ 删除中间区域(保留两边)":
+                st.success(f"✅ 将删除区间: {delete_start:.2f}s - {delete_end:.2f}s")
+                button_label = "🗑️ 执行删除并拼接"
+            else:
+                st.success(f"✅ 将保留区间: {delete_start:.2f}s - {delete_end:.2f}s")
+                button_label = "✂️ 执行裁剪,只保留此段"
             
-            if st.button("️ 执行删除并拼接", type="primary", key="delete_and_stitch"):
+            # 显示调试信息
+            with st.expander(" 查看时间对应关系(调试信息)"):
+                st.write(f"📊 **音频信息**:")
+                st.write(f"- 采样率: {sample_rate} Hz")
+                st.write(f"- 声道数: {channels}")
+                st.write(f"- 总时长: {duration:.2f} 秒")
+                st.write(f"- 总采样点数: {len(pcm_array)}")
+                st.write(f"")
+                st.write(f"️ **裁剪设置**:")
+                st.write(f"- 起点: {delete_start:.2f}秒 → 采样点索引: {int(delete_start * sample_rate)} → 字节索引: {int(delete_start * sample_rate) * 2 * channels}")
+                st.write(f"- 终点: {delete_end:.2f}秒 → 采样点索引: {int(delete_end * sample_rate)} → 字节索引: {int(delete_end * sample_rate) * 2 * channels}")
+                st.write(f"- 💡 波形图坐标: 横轴就是时间(秒),输入5.00就对应图中的5秒位置")
+            
+            if st.button(button_label, type="primary", key="execute_cut"):
                 try:
-                    # 计算采样点
-                    start_sample = int(delete_start * sample_rate * channels)
-                    end_sample = int(delete_end * sample_rate * channels)
+                    # 计算采样点(注意:pcm_array是int16数组,每个元素就是一个采样点)
+                    # 时间(秒) * 采样率 = 采样点索引
+                    start_sample_index = int(delete_start * sample_rate)
+                    end_sample_index = int(delete_end * sample_rate)
                     
-                    # 确保采样点对齐(16bit = 2bytes)
-                    start_sample = start_sample - (start_sample % 2)
-                    end_sample = end_sample - (end_sample % 2)
+                    # 转换为字节索引(每个采样点2字节,channels声道)
+                    start_byte = start_sample_index * 2 * channels
+                    end_byte = end_sample_index * 2 * channels
                     
-                    # 提取保留的部分: 前面部分 + 后面部分
-                    before_delete = pcm_data[:start_sample]
-                    after_delete = pcm_data[end_sample:]
+                    # 确保字节索引对齐(2字节=16bit)
+                    start_byte = start_byte - (start_byte % 2)
+                    end_byte = end_byte - (end_byte % 2)
                     
-                    # 拼接
-                    stitched_pcm = before_delete + after_delete
+                    # 调试信息
+                    st.info(f" 调试: 时间{delete_start:.2f}s→{delete_end:.2f}s | 采样点{start_sample_index}→{end_sample_index} | 字节{start_byte}→{end_byte}")
+                    
+                    if cut_mode == "🗑️ 删除中间区域(保留两边)":
+                        # 删除模式:提取保留的部分 - 前面部分 + 后面部分
+                        before_delete = pcm_data[:start_byte]
+                        after_delete = pcm_data[end_byte:]
+                        result_pcm = before_delete + after_delete
+                    else:
+                        # 保留模式:只提取中间部分
+                        result_pcm = pcm_data[start_byte:end_byte]
                     
                     # 转换为 WAV 格式
                     wav_buffer = BytesIO()
@@ -559,29 +641,40 @@ elif audio_tool == "✂️ PCM 裁剪器(含播放)":
                         wf.setnchannels(channels)
                         wf.setsampwidth(2)
                         wf.setframerate(sample_rate)
-                        wf.writeframes(stitched_pcm)
+                        wf.writeframes(result_pcm)
                     
                     wav_buffer.seek(0)
                     
                     # 计算新时长
-                    new_duration = len(stitched_pcm) / (sample_rate * channels * 2)
+                    new_duration = len(result_pcm) / (sample_rate * channels * 2)
                     
                     # 显示结果
-                    st.subheader("🎧 删除后的音频")
+                    st.subheader("🎧 处理后的音频")
                     st.audio(wav_buffer, format="audio/wav")
-                    st.info(f"📊 新音频时长: {new_duration:.2f}秒 (删除了 {delete_end - delete_start:.2f}秒)")
+                    
+                    if cut_mode == "️ 删除中间区域(保留两边)":
+                        st.info(f"📊 新音频时长: {new_duration:.2f}秒 (删除了 {delete_end - delete_start:.2f}秒)")
+                    else:
+                        st.info(f"📊 新音频时长: {new_duration:.2f}秒 (保留了 {delete_end - delete_start:.2f}秒)")
                     
                     # 提供下载
-                    output_filename = f"deleted_{os.path.splitext(pcm_file.name)[0]}.wav"
+                    if cut_mode == "🗑️ 删除中间区域(保留两边)":
+                        output_filename = f"deleted_{os.path.splitext(pcm_file.name)[0]}.wav"
+                    else:
+                        output_filename = f"kept_{os.path.splitext(pcm_file.name)[0]}.wav"
+                    
                     st.download_button(
                         label="📥 下载结果 (WAV)",
                         data=wav_buffer.getvalue(),
                         file_name=output_filename,
                         mime="audio/wav",
-                        key="download_deleted_pcm"
+                        key="download_result_pcm"
                     )
                     
-                    st.success("✅ 删除完成!中间区域已移除,两侧音频已拼接")
+                    if cut_mode == "🗑️ 删除中间区域(保留两边)":
+                        st.success("✅ 删除完成!中间区域已移除,两侧音频已拼接")
+                    else:
+                        st.success("✅ 裁剪完成!只保留了选中的中间区域")
                     
                 except Exception as e:
                     st.error(f"❌ 操作失败: {str(e)}")
@@ -590,3 +683,7 @@ elif audio_tool == "✂️ PCM 裁剪器(含播放)":
 
 st.markdown("---")
 st.caption("🎵 音频工具箱 | 支持 M4A/WAV/PCM 格式互转、采样率转换、PCM 播放与裁剪")
+
+
+
+
