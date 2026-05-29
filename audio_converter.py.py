@@ -6,6 +6,8 @@ import wave
 import zipfile
 import numpy as np
 import matplotlib.pyplot as plt
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 
 # ==================== 1. 配置与初始化 ====================
 
@@ -85,10 +87,167 @@ def pcm_to_wav_buffer(pcm_data, sample_rate=16000, channels=1):
     wav_buffer.seek(0)
     return wav_buffer
 
+def convert_single_file(audio_file, idx, output_format, output_sr, output_channels, 
+                        enable_crop, cut_mode, crop_start, crop_end, pcm_params):
+    """单个文件转换函数(用于并行处理)"""
+    input_path = f"temp_input_{idx}_{audio_file.name}"
+    output_ext = output_format.lower()
+    base_name = os.path.splitext(audio_file.name)[0]
+    output_path = f"temp_output_{idx}_{base_name}.{output_ext}"
+    
+    try:
+        # 保存上传文件
+        with open(input_path, "wb") as f:
+            f.write(audio_file.getbuffer())
+        
+        # 如果是裁剪模式,先裁剪
+        if enable_crop:
+            if audio_file.name.endswith('.pcm'):
+                # PCM裁剪
+                sr = pcm_params.get('sample_rate', 16000)
+                ch = pcm_params.get('channels', 1)
+                # 转换为bytes类型(修复memoryview拼接错误)
+                pcm_data = bytes(audio_file.getbuffer())
+                
+                # 修复:时间 → 采样点索引 → 字节索引
+                start_sample_index = int(crop_start * sr)  # 采样点索引
+                end_sample_index = int(crop_end * sr)
+                
+                # 转换为字节索引(每个采样点2字节 × 声道数)
+                start_byte = start_sample_index * 2 * ch
+                end_byte = end_sample_index * 2 * ch
+                
+                # 确保字节对齐
+                start_byte = start_byte - (start_byte % 2)
+                end_byte = end_byte - (end_byte % 2)
+                
+                # 根据裁剪模式处理
+                if cut_mode == "✂️ 只保留中间区域(删除两边)":
+                    # 只保留中间部分
+                    cropped_pcm = pcm_data[start_byte:end_byte]
+                else:
+                    # 删除中间,拼接两边
+                    before_delete = pcm_data[:start_byte]
+                    after_delete = pcm_data[end_byte:]
+                    cropped_pcm = before_delete + after_delete
+                
+                # 保存裁剪后的PCM
+                with open(input_path, "wb") as f:
+                    f.write(cropped_pcm)
+            else:
+                # 其他格式裁剪
+                if cut_mode == "✂️ 只保留中间区域(删除两边)":
+                    # 只保留中间部分
+                    crop_command = [
+                        'ffmpeg', '-i', input_path,
+                        '-ss', str(crop_start),
+                        '-to', str(crop_end),
+                        '-y', f"temp_cropped_{audio_file.name}"
+                    ]
+                else:
+                    # 删除中间,拼接两边:使用concat滤镜
+                    # 先获取总时长
+                    duration_info, _, _, _ = get_audio_info(input_path)
+                    if duration_info:
+                        total_duration = duration_info
+                        # 构建concat命令: [0:a]atrim=0:start + [0:a]atrim=end:duration
+                        crop_command = [
+                            'ffmpeg', '-i', input_path,
+                            '-filter_complex',
+                            f'[0:a]atrim=0:{crop_start}[a1];[0:a]atrim={crop_end}:{total_duration}[a2];[a1][a2]concat=n=2:v=0:a=1[out]',
+                            '-map', '[out]',
+                            '-y', f"temp_cropped_{audio_file.name}"
+                        ]
+                    else:
+                        raise RuntimeError("无法获取音频时长")
+                
+                subprocess.run(crop_command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                input_path = f"temp_cropped_{audio_file.name}"
+        
+        # 转换音频
+        if audio_file.name.endswith('.pcm'):
+            # PCM文件处理逻辑
+            sr = pcm_params.get('sample_rate', 16000)
+            ch = pcm_params.get('channels', 1)
+            
+            # 性能优化:如果不需要转换,直接复制文件
+            if output_format == 'PCM' and output_sr == sr and output_channels == ch and not enable_crop:
+                import shutil
+                shutil.copy2(input_path, output_path)
+            elif output_format == 'PCM':
+                # PCM转PCM:只需修改采样率/声道数
+                # 先用Python的wave模块添加WAV头,再用ffmpeg转换
+                wav_path = f"temp_intermediate_{idx}.wav"
+                try:
+                    with wave.open(wav_path, 'wb') as wf:
+                        wf.setnchannels(ch)
+                        wf.setsampwidth(2)
+                        wf.setframerate(sr)
+                        with open(input_path, 'rb') as pf:
+                            wf.writeframes(pf.read())
+                    
+                    # 然后用ffmpeg转换采样率/声道数
+                    convert_audio(wav_path, output_path, 'pcm', output_sr, output_channels)
+                except Exception as e:
+                    # 如果ffmpeg失败,尝试直接使用Python处理
+                    if output_sr == sr and output_channels == ch:
+                        # 不需要转换,直接使用裁剪后的文件
+                        import shutil
+                        shutil.copy2(input_path, output_path)
+                    else:
+                        raise e
+                finally:
+                    if os.path.exists(wav_path):
+                        os.remove(wav_path)
+            else:
+                # PCM转其他格式(WAV/MP3/M4A)
+                # 先用Python的wave模块添加WAV头
+                wav_path = f"temp_intermediate_{idx}.wav"
+                try:
+                    with wave.open(wav_path, 'wb') as wf:
+                        wf.setnchannels(ch)
+                        wf.setsampwidth(2)
+                        wf.setframerate(sr)
+                        with open(input_path, 'rb') as pf:
+                            wf.writeframes(pf.read())
+                    
+                    # 然后用ffmpeg转换为目标格式
+                    convert_audio(wav_path, output_path, output_format.lower(), output_sr, output_channels)
+                except Exception as e:
+                    raise e
+                finally:
+                    if os.path.exists(wav_path):
+                        os.remove(wav_path)
+        else:
+            # 非PCM文件直接转换
+            convert_audio(input_path, output_path, output_format.lower(), output_sr, output_channels)
+        
+        # 读取输出文件
+        with open(output_path, 'rb') as f:
+            output_data = f.read()
+        
+        output_filename = f"{base_name}_converted.{output_ext}"
+        return ('success', output_filename, output_data, None)
+        
+    except Exception as e:
+        return ('failed', audio_file.name, None, str(e))
+    
+    finally:
+        # 清理临时文件
+        for tmp in [input_path, output_path, f"temp_cropped_{idx}_{audio_file.name}", f"temp_intermediate_{idx}.wav"]:
+            if os.path.exists(tmp):
+                try:
+                    os.remove(tmp)
+                except:
+                    pass
+
 # ==================== 3. 主页面布局 ====================
 
 st.title("🎵 音频处理工具箱 Pro")
 st.markdown("---")
+
+# 性能优化配置
+MAX_WORKERS = min(4, os.cpu_count() or 2)  # 最大并行线程数
 
 # 文件上传
 uploaded_files = st.file_uploader(
@@ -353,164 +512,39 @@ if uploaded_files:
             
             converted_files = []
             failed_files = []
+            total_files = len(uploaded_files)
+            completed_count = 0
+            lock = threading.Lock()
             
-            for idx, audio_file in enumerate(uploaded_files):
-                # 性能优化:每10个文件更新一次进度,减少界面刷新
-                if idx % 10 == 0 or idx == len(uploaded_files) - 1:
-                    status_text.text(f"正在处理: {audio_file.name} ({idx+1}/{len(uploaded_files)})")
+            # 性能优化:使用线程池并行处理
+            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+                # 提交所有任务
+                future_to_idx = {
+                    executor.submit(
+                        convert_single_file, 
+                        audio_file, idx, output_format, output_sr, output_channels,
+                        enable_crop, cut_mode if enable_crop else None,
+                        crop_start if enable_crop else 0, crop_end if enable_crop else 0,
+                        pcm_params
+                    ): idx for idx, audio_file in enumerate(uploaded_files)
+                }
                 
-                input_path = f"temp_input_{idx}_{audio_file.name}"
-                output_ext = output_format.lower()
-                base_name = os.path.splitext(audio_file.name)[0]
-                output_path = f"temp_output_{idx}_{base_name}.{output_ext}"
-                
-                try:
-                    # 保存上传文件
-                    with open(input_path, "wb") as f:
-                        f.write(audio_file.getbuffer())
+                # 处理完成的任务
+                for future in as_completed(future_to_idx):
+                    result = future.result()
+                    status_type, filename_or_name, data_or_none, error = result
                     
-                    # 如果是裁剪模式,先裁剪
-                    if enable_crop:
-                        if audio_file.name.endswith('.pcm'):
-                            # PCM裁剪
-                            sr = pcm_params.get('sample_rate', 16000)
-                            ch = pcm_params.get('channels', 1)
-                            # 转换为bytes类型(修复memoryview拼接错误)
-                            pcm_data = bytes(audio_file.getbuffer())
-                            
-                            # 修复:时间 → 采样点索引 → 字节索引
-                            start_sample_index = int(crop_start * sr)  # 采样点索引
-                            end_sample_index = int(crop_end * sr)
-                            
-                            # 转换为字节索引(每个采样点2字节 × 声道数)
-                            start_byte = start_sample_index * 2 * ch
-                            end_byte = end_sample_index * 2 * ch
-                            
-                            # 确保字节对齐
-                            start_byte = start_byte - (start_byte % 2)
-                            end_byte = end_byte - (end_byte % 2)
-                            
-                            # 根据裁剪模式处理
-                            if cut_mode == "✂️ 只保留中间区域(删除两边)":
-                                # 只保留中间部分
-                                cropped_pcm = pcm_data[start_byte:end_byte]
-                            else:
-                                # 删除中间,拼接两边
-                                before_delete = pcm_data[:start_byte]
-                                after_delete = pcm_data[end_byte:]
-                                cropped_pcm = before_delete + after_delete
-                            
-                            # 保存裁剪后的PCM
-                            with open(input_path, "wb") as f:
-                                f.write(cropped_pcm)
-                        else:
-                            # 其他格式裁剪
-                            if cut_mode == "✂️ 只保留中间区域(删除两边)":
-                                # 只保留中间部分
-                                crop_command = [
-                                    'ffmpeg', '-i', input_path,
-                                    '-ss', str(crop_start),
-                                    '-to', str(crop_end),
-                                    '-y', f"temp_cropped_{audio_file.name}"
-                                ]
-                            else:
-                                # 删除中间,拼接两边:使用concat滤镜
-                                # 先获取总时长
-                                duration_info, _, _, _ = get_audio_info(input_path)
-                                if duration_info:
-                                    total_duration = duration_info
-                                    # 构建concat命令: [0:a]atrim=0:start + [0:a]atrim=end:duration
-                                    crop_command = [
-                                        'ffmpeg', '-i', input_path,
-                                        '-filter_complex',
-                                        f'[0:a]atrim=0:{crop_start}[a1];[0:a]atrim={crop_end}:{total_duration}[a2];[a1][a2]concat=n=2:v=0:a=1[out]',
-                                        '-map', '[out]',
-                                        '-y', f"temp_cropped_{audio_file.name}"
-                                    ]
-                                else:
-                                    st.error(f"❌ 无法获取 {audio_file.name} 的时长信息")
-                                    failed_files.append((audio_file.name, "无法获取音频时长"))
-                                    continue
-                            
-                            subprocess.run(crop_command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                            input_path = f"temp_cropped_{audio_file.name}"
-                    
-                    # 转换音频
-                    if audio_file.name.endswith('.pcm'):
-                        # PCM文件处理逻辑
-                        sr = pcm_params.get('sample_rate', 16000)
-                        ch = pcm_params.get('channels', 1)
+                    with lock:
+                        completed_count += 1
+                        progress = completed_count / total_files
+                        progress_bar.progress(progress)
                         
-                        # 性能优化:如果不需要转换,直接复制文件
-                        if output_format == 'PCM' and output_sr == sr and output_channels == ch and not enable_crop:
-                            import shutil
-                            shutil.copy2(input_path, output_path)
-                        elif output_format == 'PCM':
-                            # PCM转PCM:只需修改采样率/声道数
-                            # 先用Python的wave模块添加WAV头,再用ffmpeg转换
-                            wav_path = f"temp_intermediate_{idx}.wav"
-                            try:
-                                with wave.open(wav_path, 'wb') as wf:
-                                    wf.setnchannels(ch)
-                                    wf.setsampwidth(2)
-                                    wf.setframerate(sr)
-                                    with open(input_path, 'rb') as pf:
-                                        wf.writeframes(pf.read())
-                                
-                                # 然后用ffmpeg转换采样率/声道数
-                                convert_audio(wav_path, output_path, 'pcm', output_sr, output_channels)
-                            except Exception as e:
-                                # 如果ffmpeg失败,尝试直接使用Python处理
-                                if output_sr == sr and output_channels == ch:
-                                    # 不需要转换,直接使用裁剪后的文件
-                                    import shutil
-                                    shutil.copy2(input_path, output_path)
-                                else:
-                                    raise e
-                            finally:
-                                if os.path.exists(wav_path):
-                                    os.remove(wav_path)
+                        if status_type == 'success':
+                            converted_files.append((filename_or_name, data_or_none))
+                            status_text.text(f"✅ 已处理: {filename_or_name} ({completed_count}/{total_files})")
                         else:
-                            # PCM转其他格式(WAV/MP3/M4A)
-                            # 先用Python的wave模块添加WAV头
-                            wav_path = f"temp_intermediate_{idx}.wav"
-                            try:
-                                with wave.open(wav_path, 'wb') as wf:
-                                    wf.setnchannels(ch)
-                                    wf.setsampwidth(2)
-                                    wf.setframerate(sr)
-                                    with open(input_path, 'rb') as pf:
-                                        wf.writeframes(pf.read())
-                                
-                                # 然后用ffmpeg转换为目标格式
-                                convert_audio(wav_path, output_path, output_format.lower(), output_sr, output_channels)
-                            except Exception as e:
-                                st.error(f"❌ {audio_file.name} 转换失败: {str(e)}")
-                                raise e
-                            finally:
-                                if os.path.exists(wav_path):
-                                    os.remove(wav_path)
-                    else:
-                        # 非PCM文件直接转换
-                        convert_audio(input_path, output_path, output_format.lower(), output_sr, output_channels)
-                    
-                    # 读取输出文件
-                    with open(output_path, 'rb') as f:
-                        output_data = f.read()
-                    
-                    output_filename = f"{base_name}_converted.{output_ext}"
-                    converted_files.append((output_filename, output_data))
-                    
-                except Exception as e:
-                    failed_files.append((audio_file.name, str(e)))
-                
-                finally:
-                    # 清理临时文件
-                    for tmp in [input_path, output_path, f"temp_cropped_{idx}_{audio_file.name}", f"temp_intermediate_{idx}.wav"]:
-                        if os.path.exists(tmp):
-                            os.remove(tmp)
-                
-                progress_bar.progress((idx + 1) / len(uploaded_files))
+                            failed_files.append((filename_or_name, error))
+                            status_text.text(f"❌ 失败: {filename_or_name} ({completed_count}/{total_files})")
             
             progress_bar.empty()
             status_text.empty()
@@ -530,9 +564,9 @@ if uploaded_files:
                         key="download_single"
                     )
                 else:
-                    # 多个文件打包ZIP
+                    # 多个文件打包ZIP - 性能优化:使用流式写入
                     zip_buffer = BytesIO()
-                    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+                    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zip_file:
                         for fname, fdata in converted_files:
                             zip_file.writestr(fname, fdata)
                     
@@ -548,7 +582,7 @@ if uploaded_files:
                 st.warning(f"⚠️ {len(failed_files)} 个文件处理失败:")
                 for fname, error in failed_files:
                     st.error(f"- {fname}: {error}")
-
+    
 # ==================== 底部信息 ====================
 
 st.markdown("---")
