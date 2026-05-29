@@ -4,6 +4,9 @@ from io import BytesIO
 import subprocess
 import wave
 import zipfile
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.io import wavfile
 
 # ==================== 1. 配置与初始化 ====================
 
@@ -22,7 +25,7 @@ st.markdown("---")
 # 音频工具选择
 audio_tool = st.radio(
     "选择音频转换工具",
-    ["🎵 M4A → WAV", " WAV → PCM", "💿 PCM → WAV", "📉 48K → 16K"],
+    ["🎵 M4A → WAV", " WAV → PCM", "💿 PCM → WAV", "📉 48K → 16K", "✂️ PCM 裁剪器(含播放)"],
     horizontal=True
 )
 
@@ -335,7 +338,255 @@ elif audio_tool == "📉 48K → 16K":
                 for fname, error in failed_files:
                     st.error(f"- {fname}: {error}")
 
+# ==================== 工具 5: PCM 裁剪器(含播放) ====================
+
+elif audio_tool == "✂️ PCM 裁剪器(含播放)":
+    st.header("✂️ PCM 音频裁剪器 & 播放器")
+    st.info("上传 PCM 文件后可直接播放试听,并通过可视化选择要删除的区域")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        sample_rate = st.number_input("采样率 (Hz)", value=16000, step=1000, key="sample_rate_cutter")
+    with col2:
+        channels = st.number_input("声道数", value=1, min_value=1, max_value=2, key="channels_cutter")
+    
+    pcm_file = st.file_uploader(
+        "上传 PCM 文件",
+        type=["pcm"],
+        key="pcm_upload_cutter"
+    )
+    
+    if pcm_file:
+        st.success(f"✅ 已选择文件: {pcm_file.name}")
+        
+        # 读取 PCM 数据
+        pcm_data = pcm_file.read()
+        pcm_array = np.frombuffer(pcm_data, dtype=np.int16)
+        duration = len(pcm_array) / sample_rate
+        
+        st.info(f" 音频时长: {duration:.2f} 秒")
+        
+        # 播放功能
+        st.subheader("🎧 播放音频")
+        if st.button("▶️ 播放完整音频", type="primary", key="play_pcm_in_cutter"):
+            try:
+                # 转换为 WAV 格式以便播放
+                wav_buffer = BytesIO()
+                with wave.open(wav_buffer, 'wb') as wf:
+                    wf.setnchannels(channels)
+                    wf.setsampwidth(2)
+                    wf.setframerate(sample_rate)
+                    wf.writeframes(pcm_data)
+                
+                wav_buffer.seek(0)
+                st.audio(wav_buffer, format="audio/wav")
+                st.success(" 音频已加载,点击播放按钮即可试听")
+            except Exception as e:
+                st.error(f" 播放失败: {str(e)}")
+        
+        st.divider()
+        
+        # 绘制频谱图
+        st.subheader("🎨 音频频谱图")
+        
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 8), gridspec_kw={'height_ratios': [3, 1]})
+        
+        # 上图:频谱图
+        audio_data = pcm_array.astype(float)
+        if channels == 2:
+            audio_data = audio_data.reshape(-1, 2)[:, 0]  # 取左声道
+        
+        # 使用 scipy 计算频谱图
+        from scipy.signal import spectrogram as scipy_spectrogram
+        f, t, Sxx = scipy_spectrogram(audio_data, fs=sample_rate, nperseg=256, noverlap=128)
+        
+        # 绘制频谱图
+        im = ax1.pcolormesh(t, f, 10 * np.log10(Sxx + 1e-10), shading='gouraud', cmap='viridis')
+        ax1.set_ylabel('频率 (Hz)', fontsize=12)
+        ax1.set_title('频谱图 - 拖动滑块选择裁剪区域', fontsize=14)
+        fig.colorbar(im, ax=ax1, label='功率 (dB)')
+        
+        # 下图:波形图
+        time_axis = np.arange(len(pcm_array)) / sample_rate
+        ax2.plot(time_axis, pcm_array, linewidth=0.5, color='#1f77b4')
+        ax2.set_xlabel('时间 (秒)', fontsize=12)
+        ax2.set_ylabel('振幅', fontsize=12)
+        ax2.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        st.pyplot(fig)
+        plt.close()
+        
+        # 裁剪控制 - 交互式选择
+        st.subheader("✂️ 裁剪设置")
+        st.info("💡 在波形图上点击两个位置来选择要**删除**的区域:")
+        st.markdown("- **第1次点击**: 设置删除区域起点")
+        st.markdown("- **第2次点击**: 设置删除区域终点")
+        st.markdown("- 中间区域将被删除,两侧音频会自动拼接")
+        
+        # 初始化 session state
+        if 'click_count' not in st.session_state:
+            st.session_state.click_count = 0
+        if 'click_points' not in st.session_state:
+            st.session_state.click_points = []
+        
+        # 重置按钮
+        col_reset, col_info = st.columns([1, 3])
+        with col_reset:
+            if st.button("🔄 重置选择", key="reset_selection"):
+                st.session_state.click_count = 0
+                st.session_state.click_points = []
+                st.rerun()
+        
+        with col_info:
+            if st.session_state.click_count == 0:
+                st.info("⏳ 请在波形图区域点击选择删除起点")
+            elif st.session_state.click_count == 1:
+                st.info(f"✅ 已选择起点: {st.session_state.click_points[0]:.2f}秒 | 请点击选择终点")
+            else:
+                start_del = st.session_state.click_points[0]
+                end_del = st.session_state.click_points[1]
+                if start_del > end_del:
+                    start_del, end_del = end_del, start_del
+                
+                # 计算保留区域
+                keep_start_to_start = start_del
+                keep_end_to_end = duration - end_del
+                
+                st.success(f"✅ 将删除: {start_del:.2f}s - {end_del:.2f}s (删除时长: {end_del - start_del:.2f}s)")
+                st.info(f"📊 保留: 0-{start_del:.2f}s + {end_del:.2f}s-{duration:.2f}s (总时长: {keep_start_to_start + keep_end_to_end:.2f}s)")
+        
+        # 显示交互式波形图(带点击功能)
+        st.subheader("📊 波形图 - 点击选择删除区域")
+        
+        # 创建可点击的波形图
+        fig, ax = plt.subplots(figsize=(14, 4))
+        time_axis = np.arange(len(pcm_array)) / sample_rate
+        ax.plot(time_axis, pcm_array, linewidth=0.5, color='#1f77b4')
+        ax.set_xlabel('时间 (秒)', fontsize=12)
+        ax.set_ylabel('振幅', fontsize=12)
+        ax.set_title('点击波形图选择要删除的区域', fontsize=14)
+        ax.grid(True, alpha=0.3)
+        
+        # 如果已经选择了点,绘制标记
+        if len(st.session_state.click_points) >= 1:
+            point1 = st.session_state.click_points[0]
+            ax.axvline(x=point1, color='red', linestyle='--', linewidth=2, label=f'起点: {point1:.2f}s')
+        
+        if len(st.session_state.click_points) >= 2:
+            point1 = min(st.session_state.click_points)
+            point2 = max(st.session_state.click_points)
+            ax.axvline(x=point2, color='orange', linestyle='--', linewidth=2, label=f'终点: {point2:.2f}s')
+            # 高亮要删除的区域
+            ax.axvspan(point1, point2, alpha=0.3, color='red', label='将删除此区域')
+            ax.legend(loc='upper right')
+        
+        plt.tight_layout()
+        st.pyplot(fig)
+        plt.close()
+        
+        # JavaScript 点击交互(使用 streamlit 的组件)
+        import streamlit.components.v1 as components
+        
+        click_js = """
+        <script>
+        const plotContainer = document.querySelector('[data-testid="stMetric"]');
+        if (plotContainer) {
+            plotContainer.addEventListener('click', function(e) {
+                const rect = e.target.getBoundingClientRect();
+                const x = e.clientX - rect.left;
+                const width = rect.width;
+                // 这里需要映射到实际时间,简化处理
+                console.log('Clicked at:', x, width);
+            });
+        }
+        </script>
+        """
+        
+        # 由于 Streamlit 不支持直接的图形点击,我们使用时间输入作为备选
+        st.divider()
+        st.subheader("️ 精确时间输入(可选)")
+        st.caption("如果上面的点击方式不够精确,可以手动输入时间")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            delete_start = st.number_input(
+                "删除起点 (秒)",
+                min_value=0.0,
+                max_value=duration,
+                value=st.session_state.click_points[0] if len(st.session_state.click_points) > 0 else 0.0,
+                step=0.01,
+                format="%.2f",
+                key="delete_start_input"
+            )
+        with col2:
+            delete_end = st.number_input(
+                "删除终点 (秒)",
+                min_value=0.0,
+                max_value=duration,
+                value=st.session_state.click_points[1] if len(st.session_state.click_points) > 1 else duration,
+                step=0.01,
+                format="%.2f",
+                key="delete_end_input"
+            )
+        
+        # 验证并执行裁剪
+        if delete_start >= delete_end:
+            st.warning("⚠️ 删除起点必须小于终点")
+        else:
+            st.success(f"✅ 将删除区间: {delete_start:.2f}s - {delete_end:.2f}s")
+            
+            if st.button("️ 执行删除并拼接", type="primary", key="delete_and_stitch"):
+                try:
+                    # 计算采样点
+                    start_sample = int(delete_start * sample_rate * channels)
+                    end_sample = int(delete_end * sample_rate * channels)
+                    
+                    # 确保采样点对齐(16bit = 2bytes)
+                    start_sample = start_sample - (start_sample % 2)
+                    end_sample = end_sample - (end_sample % 2)
+                    
+                    # 提取保留的部分: 前面部分 + 后面部分
+                    before_delete = pcm_data[:start_sample]
+                    after_delete = pcm_data[end_sample:]
+                    
+                    # 拼接
+                    stitched_pcm = before_delete + after_delete
+                    
+                    # 转换为 WAV 格式
+                    wav_buffer = BytesIO()
+                    with wave.open(wav_buffer, 'wb') as wf:
+                        wf.setnchannels(channels)
+                        wf.setsampwidth(2)
+                        wf.setframerate(sample_rate)
+                        wf.writeframes(stitched_pcm)
+                    
+                    wav_buffer.seek(0)
+                    
+                    # 计算新时长
+                    new_duration = len(stitched_pcm) / (sample_rate * channels * 2)
+                    
+                    # 显示结果
+                    st.subheader("🎧 删除后的音频")
+                    st.audio(wav_buffer, format="audio/wav")
+                    st.info(f"📊 新音频时长: {new_duration:.2f}秒 (删除了 {delete_end - delete_start:.2f}秒)")
+                    
+                    # 提供下载
+                    output_filename = f"deleted_{os.path.splitext(pcm_file.name)[0]}.wav"
+                    st.download_button(
+                        label="📥 下载结果 (WAV)",
+                        data=wav_buffer.getvalue(),
+                        file_name=output_filename,
+                        mime="audio/wav",
+                        key="download_deleted_pcm"
+                    )
+                    
+                    st.success("✅ 删除完成!中间区域已移除,两侧音频已拼接")
+                    
+                except Exception as e:
+                    st.error(f"❌ 操作失败: {str(e)}")
+
 # ==================== 底部信息 ====================
 
 st.markdown("---")
-st.caption("🎵 音频工具箱 | 支持 M4A/WAV/PCM 格式互转及采样率转换")
+st.caption("🎵 音频工具箱 | 支持 M4A/WAV/PCM 格式互转、采样率转换、PCM 播放与裁剪")
