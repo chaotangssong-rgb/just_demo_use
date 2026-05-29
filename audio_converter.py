@@ -87,8 +87,26 @@ def pcm_to_wav_buffer(pcm_data, sample_rate=16000, channels=1):
     wav_buffer.seek(0)
     return wav_buffer
 
+def generate_silence(duration, sample_rate=16000, channels=1):
+    """生成静默音频数据(PCM格式)
+    
+    Args:
+        duration: 静默时长(秒)
+        sample_rate: 采样率
+        channels: 声道数
+    
+    Returns:
+        bytes: 静默音频数据
+    """
+    # 计算采样点数
+    num_samples = int(duration * sample_rate)
+    # 生成16位静音数据(全部为0)
+    silence = np.zeros(num_samples * channels, dtype=np.int16)
+    return silence.tobytes()
+
 def convert_single_file(audio_file, idx, output_format, output_sr, output_channels, 
-                        enable_crop, cut_mode, crop_start, crop_end, pcm_params):
+                        enable_crop, cut_mode, crop_start, crop_end, pcm_params,
+                        enable_silence=False, silence_start=0.0, silence_end=0.0):
     """单个文件转换函数(用于并行处理)"""
     input_path = f"temp_input_{idx}_{audio_file.name}"
     output_ext = output_format.lower()
@@ -164,6 +182,80 @@ def convert_single_file(audio_file, idx, output_format, output_sr, output_channe
                 subprocess.run(crop_command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 input_path = f"temp_cropped_{audio_file.name}"
         
+        # 如果需要添加静默,使用ffmpeg的concat滤镜
+        if enable_silence and (silence_start > 0 or silence_end > 0):
+            temp_silence_start = f"temp_silence_start_{idx}.wav"
+            temp_silence_end = f"temp_silence_end_{idx}.wav"
+            temp_with_silence = f"temp_with_silence_{idx}.wav"
+            
+            try:
+                # 获取当前音频信息
+                if audio_file.name.endswith('.pcm'):
+                    sr = pcm_params.get('sample_rate', 16000)
+                    ch = pcm_params.get('channels', 1)
+                else:
+                    _, sr, ch, _ = get_audio_info(input_path)
+                    if not sr:
+                        sr = 16000
+                    if not ch:
+                        ch = 1
+                
+                parts = []
+                
+                # 添加开头静默
+                if silence_start > 0:
+                    silence_data = generate_silence(silence_start, sr, ch)
+                    with wave.open(temp_silence_start, 'wb') as wf:
+                        wf.setnchannels(ch)
+                        wf.setsampwidth(2)
+                        wf.setframerate(sr)
+                        wf.writeframes(silence_data)
+                    parts.append(temp_silence_start)
+                
+                # 添加原音频
+                parts.append(input_path)
+                
+                # 添加结尾静默
+                if silence_end > 0:
+                    silence_data = generate_silence(silence_end, sr, ch)
+                    with wave.open(temp_silence_end, 'wb') as wf:
+                        wf.setnchannels(ch)
+                        wf.setsampwidth(2)
+                        wf.setframerate(sr)
+                        wf.writeframes(silence_data)
+                    parts.append(temp_silence_end)
+                
+                # 使用ffmpeg concat所有部分
+                if len(parts) == 1:
+                    # 只有原音频,不需要concat
+                    temp_with_silence = input_path
+                else:
+                    # 构建concat命令
+                    concat_inputs = ''
+                    concat_filter = ''
+                    for i, part in enumerate(parts):
+                        concat_inputs += f'-i "{part}" '
+                        concat_filter += f'[{i}:a]'
+                    concat_filter += f'concat=n={len(parts)}:v=0:a=1[out]'
+                    
+                    concat_command = f'ffmpeg {concat_inputs} -filter_complex "{concat_filter}" -map "[out]" -y "{temp_with_silence}"'
+                    subprocess.run(concat_command, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                
+                # 更新input_path
+                input_path = temp_with_silence
+                
+            except Exception as e:
+                # 如果添加静默失败,继续使用原音频
+                print(f"警告: 添加静默失败,将使用原音频: {str(e)}")
+            finally:
+                # 清理静默临时文件
+                for tmp in [temp_silence_start, temp_silence_end]:
+                    if os.path.exists(tmp):
+                        try:
+                            os.remove(tmp)
+                        except:
+                            pass
+        
         # 转换音频
         if audio_file.name.endswith('.pcm'):
             # PCM文件处理逻辑
@@ -171,7 +263,7 @@ def convert_single_file(audio_file, idx, output_format, output_sr, output_channe
             ch = pcm_params.get('channels', 1)
             
             # 性能优化:如果不需要转换,直接复制文件
-            if output_format == 'PCM' and output_sr == sr and output_channels == ch and not enable_crop:
+            if output_format == 'PCM' and output_sr == sr and output_channels == ch and not enable_crop and not enable_silence:
                 import shutil
                 shutil.copy2(input_path, output_path)
             elif output_format == 'PCM':
@@ -234,7 +326,8 @@ def convert_single_file(audio_file, idx, output_format, output_sr, output_channe
     
     finally:
         # 清理临时文件
-        for tmp in [input_path, output_path, f"temp_cropped_{idx}_{audio_file.name}", f"temp_intermediate_{idx}.wav"]:
+        for tmp in [input_path, output_path, f"temp_cropped_{idx}_{audio_file.name}", f"temp_intermediate_{idx}.wav", 
+                    f"temp_with_silence_{idx}.wav", f"temp_silence_start_{idx}.wav", f"temp_silence_end_{idx}.wav"]:
             if os.path.exists(tmp):
                 try:
                     os.remove(tmp)
@@ -447,6 +540,45 @@ if uploaded_files:
     
     st.divider()
     
+    # 静默设置
+    st.subheader(" 添加静默时间 (可选)")
+    enable_silence = st.checkbox("在音频前后添加静默", key="enable_silence")
+    
+    if enable_silence:
+        st.info(" 在音频的开头和/或结尾添加静音段，常用于制作音频样本、测试音频等")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            silence_start = st.number_input(
+                "开头静默时长 (秒)",
+                min_value=0.0,
+                max_value=10.0,
+                value=0.0,
+                step=0.1,
+                format="%.1f",
+                key="silence_start"
+            )
+        with col2:
+            silence_end = st.number_input(
+                "结尾静默时长 (秒)",
+                min_value=0.0,
+                max_value=10.0,
+                value=0.0,
+                step=0.1,
+                format="%.1f",
+                key="silence_end"
+            )
+        
+        if silence_start == 0 and silence_end == 0:
+            st.warning("⚠️ 请设置开头或结尾的静默时长")
+        else:
+            if silence_start > 0:
+                st.success(f"✅ 将在开头添加 {silence_start:.1f}秒 静默")
+            if silence_end > 0:
+                st.success(f"✅ 将在结尾添加 {silence_end:.1f}秒 静默")
+    
+    st.divider()
+    
     # 操作按钮
     col1, col2, col3 = st.columns([1, 1, 1])
     with col1:
@@ -505,6 +637,8 @@ if uploaded_files:
     if convert_all:
         if enable_crop and crop_start >= crop_end:
             st.error("❌ 请先修正裁剪时间!")
+        elif enable_silence and silence_start == 0 and silence_end == 0:
+            st.error(" 请设置静默时长!")
         else:
             st.subheader("🔄 处理进度")
             progress_bar = st.progress(0)
@@ -525,7 +659,8 @@ if uploaded_files:
                         audio_file, idx, output_format, output_sr, output_channels,
                         enable_crop, cut_mode if enable_crop else None,
                         crop_start if enable_crop else 0, crop_end if enable_crop else 0,
-                        pcm_params
+                        pcm_params,
+                        enable_silence, silence_start, silence_end
                     ): idx for idx, audio_file in enumerate(uploaded_files)
                 }
                 
