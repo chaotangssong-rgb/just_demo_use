@@ -6,7 +6,6 @@ import wave
 import zipfile
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy.signal import spectrogram as scipy_spectrogram
 
 # ==================== 1. 配置与初始化 ====================
 
