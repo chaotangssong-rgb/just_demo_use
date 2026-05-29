@@ -1081,6 +1081,60 @@ if uploaded_files:
                 if all_split_files:
                     converted_files = all_split_files
                     st.success(f"✅ 成功分割为 {len(converted_files)} 个文件")
+                    
+                    # 添加试听功能
+                    st.subheader("🎧 试听分割结果")
+                    st.info(" 点击播放按钮即可在线试听每个分割片段")
+                    
+                    # 创建可折叠的播放器列表
+                    with st.expander(" 展开查看所有分割片段", expanded=True):
+                        for idx, (fname, fdata) in enumerate(converted_files):
+                            st.markdown(f"**片段 {idx+1}: {fname}**")
+                            
+                            # 确定MIME类型
+                            if fname.endswith('.wav'):
+                                mime_type = "audio/wav"
+                            elif fname.endswith('.mp3'):
+                                mime_type = "audio/mp3"
+                            elif fname.endswith('.m4a'):
+                                mime_type = "audio/mp4"
+                            elif fname.endswith('.pcm'):
+                                # PCM需要转换为WAV才能播放
+                                try:
+                                    sr = output_sr
+                                    ch = output_channels
+                                    fdata = pcm_to_wav_buffer(fdata, sr, ch)
+                                    mime_type = "audio/wav"
+                                except:
+                                    st.warning("⚠️ PCM格式无法直接播放,请下载后使用专业工具播放")
+                                    continue
+                            else:
+                                mime_type = "application/octet-stream"
+                            
+                            # 显示音频播放器
+                            try:
+                                st.audio(fdata, format=mime_type)
+                            except Exception as e:
+                                st.error(f"❌ 播放失败: {str(e)}")
+                            
+                            # 获取音频信息
+                            try:
+                                # 保存临时文件获取信息
+                                temp_play_path = f"temp_play_{idx}.{fname.split('.')[-1]}"
+                                with open(temp_play_path, 'wb') as f:
+                                    f.write(fdata)
+                                
+                                if not fname.endswith('.pcm'):
+                                    duration, sr, ch, codec = get_audio_info(temp_play_path)
+                                    if duration:
+                                        st.caption(f"⏱️ 时长: {duration:.2f}秒 |  采样率: {sr}Hz | 🔊 声道: {ch}")
+                                
+                                if os.path.exists(temp_play_path):
+                                    os.remove(temp_play_path)
+                            except:
+                                pass
+                            
+                            st.markdown("---")
             
             # 显示结果
             if converted_files:
