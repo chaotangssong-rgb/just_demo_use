@@ -104,9 +104,171 @@ def generate_silence(duration, sample_rate=16000, channels=1):
     silence = np.zeros(num_samples * channels, dtype=np.int16)
     return silence.tobytes()
 
+def adjust_volume(input_path, output_path, volume_db=0):
+    """调整音频音量
+    
+    Args:
+        input_path: 输入文件路径
+        output_path: 输出文件路径
+        volume_db: 音量调整值(dB),正数增大,负数减小
+    """
+    command = [
+        'ffmpeg', '-i', input_path,
+        '-filter:a', f'volume={volume_db}dB',
+        '-y', output_path
+    ]
+    subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+def normalize_audio(input_path, output_path, target_db=-3.0):
+    """音频标准化(归一化)
+    
+    Args:
+        input_path: 输入文件路径
+        output_path: 输出文件路径
+        target_db: 目标响度(dB),默认-3dB
+    """
+    command = [
+        'ffmpeg', '-i', input_path,
+        '-filter:a', f'loudnorm=I={target_db}:TP=-1.5:LRA=11',
+        '-y', output_path
+    ]
+    subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+def split_audio(input_path, output_dir, segment_duration, output_format='wav'):
+    """将音频分割成多个小段(按固定时长)
+    
+    Args:
+        input_path: 输入文件路径
+        output_dir: 输出目录
+        segment_duration: 每段时长(秒)
+        output_format: 输出格式
+    
+    Returns:
+        list: 分割后的文件路径列表
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # 获取音频时长
+    duration, sr, ch, codec = get_audio_info(input_path)
+    if not duration:
+        raise RuntimeError("无法获取音频时长")
+    
+    # 计算需要分割的段数
+    num_segments = int(np.ceil(duration / segment_duration))
+    
+    output_files = []
+    base_name = os.path.splitext(os.path.basename(input_path))[0]
+    
+    for i in range(num_segments):
+        start_time = i * segment_duration
+        output_file = os.path.join(output_dir, f"{base_name}_part{i+1:03d}.{output_format}")
+        
+        command = [
+            'ffmpeg', '-i', input_path,
+            '-ss', str(start_time),
+            '-t', str(segment_duration),
+            '-y', output_file
+        ]
+        
+        subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        output_files.append(output_file)
+    
+    return output_files
+
+def split_audio_by_silence(input_path, output_dir, silence_threshold=-50, min_silence_duration=0.5, output_format='wav'):
+    """基于静音检测的智能音频分割
+    
+    Args:
+        input_path: 输入文件路径
+        output_dir: 输出目录
+        silence_threshold: 静音阈值(dB),低于此值认为是静音,默认-50dB
+        min_silence_duration: 最小静音持续时间(秒),超过此时长才认为是有意义的停顿,默认0.5秒
+        output_format: 输出格式
+    
+    Returns:
+        list: 分割后的文件路径列表
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # 使用ffmpeg的silencedetect滤镜检测静音
+    command = [
+        'ffmpeg', '-i', input_path,
+        '-af', f'silencedetect=noise={silence_threshold}dB:d={min_silence_duration}',
+        '-f', 'null', '-'
+    ]
+    
+    result = subprocess.run(command, capture_output=True, text=True)
+    output = result.stderr
+    
+    # 解析静音检测结果
+    import re
+    silence_starts = []
+    silence_ends = []
+    
+    for line in output.split('\n'):
+        if 'silence_start:' in line:
+            match = re.search(r'silence_start:\s*([\d.]+)', line)
+            if match:
+                silence_starts.append(float(match.group(1)))
+        elif 'silence_end:' in line:
+            match = re.search(r'silence_end:\s*([\d.]+)', line)
+            if match:
+                silence_ends.append(float(match.group(1)))
+    
+    # 获取音频总时长
+    duration, sr, ch, codec = get_audio_info(input_path)
+    if not duration:
+        raise RuntimeError("无法获取音频时长")
+    
+    # 构建分割区间(非静音部分)
+    segments = []
+    
+    if not silence_starts:
+        # 没有检测到静音,整个音频作为一段
+        segments.append((0, duration))
+    else:
+        # 第一个非静音段(从开始到第一个静音前)
+        if silence_starts[0] > 0:
+            segments.append((0, silence_starts[0]))
+        
+        # 中间的非静音段(静音结束后到下一个静音开始前)
+        for i in range(len(silence_ends)):
+            if i < len(silence_starts) - 1:
+                start = silence_ends[i]
+                end = silence_starts[i + 1]
+                if end > start:
+                    segments.append((start, end))
+        
+        # 最后一个非静音段(最后一个静音结束后到结束)
+        if silence_ends:
+            last_end = silence_ends[-1]
+            if last_end < duration:
+                segments.append((last_end, duration))
+    
+    # 执行分割
+    output_files = []
+    base_name = os.path.splitext(os.path.basename(input_path))[0]
+    
+    for idx, (start, end) in enumerate(segments):
+        output_file = os.path.join(output_dir, f"{base_name}_segment{idx+1:03d}.{output_format}")
+        
+        command = [
+            'ffmpeg', '-i', input_path,
+            '-ss', str(start),
+            '-to', str(end),
+            '-y', output_file
+        ]
+        
+        subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        output_files.append(output_file)
+    
+    return output_files
+
 def convert_single_file(audio_file, idx, output_format, output_sr, output_channels, 
                         enable_crop, cut_mode, crop_start, crop_end, pcm_params,
-                        enable_silence=False, silence_start=0.0, silence_end=0.0):
+                        enable_silence=False, silence_start=0.0, silence_end=0.0,
+                        enable_volume=False, volume_mode='adjust', volume_value=0,
+                        enable_split=False, split_duration=10.0):
     """单个文件转换函数(用于并行处理)"""
     input_path = f"temp_input_{idx}_{audio_file.name}"
     output_ext = output_format.lower()
@@ -253,6 +415,28 @@ def convert_single_file(audio_file, idx, output_format, output_sr, output_channe
                     if os.path.exists(tmp):
                         try:
                             os.remove(tmp)
+                        except:
+                            pass
+        
+        # 音量调整/标准化
+        if enable_volume:
+            temp_volume = f"temp_volume_{idx}.wav"
+            try:
+                if volume_mode == 'normalize':
+                    # 标准化到目标响度
+                    normalize_audio(input_path, temp_volume, target_db=volume_value)
+                else:
+                    # 手动调整音量
+                    adjust_volume(input_path, temp_volume, volume_db=volume_value)
+                input_path = temp_volume
+            except Exception as e:
+                print(f"警告: 音量调整失败,将使用原音频: {str(e)}")
+            finally:
+                if os.path.exists(temp_volume):
+                    # 如果已经更新了input_path,就不删除
+                    if input_path != temp_volume:
+                        try:
+                            os.remove(temp_volume)
                         except:
                             pass
         
@@ -579,6 +763,126 @@ if uploaded_files:
     
     st.divider()
     
+    # 音量设置
+    st.subheader(" 音量调整 (可选)")
+    enable_volume = st.checkbox("启用音量调整", key="enable_volume")
+    
+    if enable_volume:
+        volume_mode = st.radio(
+            "选择音量调整模式:",
+            [" 手动调整", "📊 标准化(归一化)"],
+            horizontal=True,
+            key="volume_mode"
+        )
+        
+        if volume_mode == " 手动调整":
+            st.info(" 手动设置音量增益,正数增大音量,负数减小音量")
+            volume_value = st.slider(
+                "音量调整 (dB)",
+                min_value=-20.0,
+                max_value=20.0,
+                value=0.0,
+                step=0.5,
+                format="%.1f",
+                key="volume_slider"
+            )
+            if volume_value > 0:
+                st.success(f"✅ 将增大音量 {volume_value:.1f}dB")
+            elif volume_value < 0:
+                st.info(f" 将减小音量 {abs(volume_value):.1f}dB")
+            else:
+                st.warning("⚠️ 音量调整为0dB,不会改变音量")
+        else:
+            st.info(" 自动调整音量到目标响度,使所有音频音量一致")
+            volume_value = st.selectbox(
+                "目标响度 (dB)",
+                [-23.0, -16.0, -10.0, -3.0],
+                index=3,
+                key="normalize_db"
+            )
+            st.success(f"✅ 将标准化到 {volume_value:.1f}dB LUFS")
+    
+    st.divider()
+    
+    # 音频分割设置
+    st.subheader(" 音频分割 (可选)")
+    enable_split = st.checkbox("启用音频分割", key="enable_split")
+        
+    if enable_split:
+        # 选择分割模式
+        split_mode = st.radio(
+            "选择分割模式:",
+            [" 按固定时长分割", " 智能分割(基于静音检测)"],
+            horizontal=True,
+            key="split_mode_radio"
+        )
+            
+        if split_mode == " 按固定时长分割":
+            st.info(" 将每个音频文件按指定时长平均分割成多个小段")
+                
+            col1, col2 = st.columns(2)
+            with col1:
+                split_duration = st.number_input(
+                    "每段时长 (秒)",
+                    min_value=1.0,
+                    max_value=3600.0,
+                    value=10.0,
+                    step=1.0,
+                    format="%.1f",
+                    key="split_duration"
+                )
+            with col2:
+                split_format = st.selectbox(
+                    "分割后格式",
+                    ["WAV", "MP3", "M4A", "PCM"],
+                    index=0,
+                    key="split_format"
+                )
+                
+            st.success(f" 每 {split_duration:.1f}秒 分割一次")
+                
+        else:  # 智能分割
+            st.info(" 自动识别音频中的静音/停顿,将内容按自然分段切割,适合语音、播客、会议录音等")
+                
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                silence_threshold = st.slider(
+                    "静音阈值 (dB)",
+                    min_value=-80.0,
+                    max_value=-20.0,
+                    value=-50.0,
+                    step=1.0,
+                    format="%.1f",
+                    key="silence_threshold",
+                    help="低于此值的音量被认为是静音。值越小(如-60dB)越严格,值越大(如-40dB)越宽松"
+                )
+            with col2:
+                min_silence_duration = st.number_input(
+                    "最小静音时长 (秒)",
+                    min_value=0.1,
+                    max_value=5.0,
+                    value=0.5,
+                    step=0.1,
+                    format="%.1f",
+                    key="min_silence_duration",
+                    help="静音持续时间超过此值才认为是有效的分段点"
+                )
+            with col3:
+                split_format = st.selectbox(
+                    "分割后格式",
+                    ["WAV", "MP3", "M4A", "PCM"],
+                    index=0,
+                    key="split_format_smart"
+                )
+                
+            st.success(f" 阈值: {silence_threshold:.1f}dB, 最小静音: {min_silence_duration:.1f}秒")
+            st.caption("💡 提示: 语音通常使用 -50dB/0.5秒,音乐使用 -60dB/0.3秒")
+            
+        if len(uploaded_files) > 1:
+            st.warning(f"️ 将对所有 {len(uploaded_files)} 个文件执行分割")
+    
+    st.divider()
+    
     # 操作按钮
     col1, col2, col3 = st.columns([1, 1, 1])
     with col1:
@@ -586,8 +890,27 @@ if uploaded_files:
     with col2:
         convert_all = st.button("🚀 转换并下载", type="primary", key="convert_all")
     with col3:
-        if st.button("🔄 重置", key="reset_all"):
+        if st.button(" 重置", key="reset_all"):
             st.rerun()
+    
+    # 确保所有变量都有默认值,避免未定义错误
+    # 静默相关变量
+    if not enable_silence:
+        silence_start = 0.0
+        silence_end = 0.0
+    
+    # 音量相关变量  
+    if not enable_volume:
+        volume_mode = 'adjust'
+        volume_value = 0
+    
+    # 分割相关变量
+    if not enable_split:
+        split_mode = " 按固定时长分割"
+        split_duration = 10.0
+        split_format = 'wav'
+        silence_threshold = -50.0
+        min_silence_duration = 0.5
     
     # ==================== 播放功能 ====================
     if play_all:
@@ -636,7 +959,7 @@ if uploaded_files:
     # ==================== 转换功能 ====================
     if convert_all:
         if enable_crop and crop_start >= crop_end:
-            st.error("❌ 请先修正裁剪时间!")
+            st.error(" 请先修正裁剪时间!")
         elif enable_silence and silence_start == 0 and silence_end == 0:
             st.error(" 请设置静默时长!")
         else:
@@ -660,7 +983,10 @@ if uploaded_files:
                         enable_crop, cut_mode if enable_crop else None,
                         crop_start if enable_crop else 0, crop_end if enable_crop else 0,
                         pcm_params,
-                        enable_silence, silence_start, silence_end
+                        enable_silence, silence_start, silence_end,
+                        enable_volume, volume_mode if enable_volume else 'adjust',
+                        volume_value if enable_volume else 0,
+                        False, 0  # split功能在转换后单独执行
                     ): idx for idx, audio_file in enumerate(uploaded_files)
                 }
                 
@@ -684,12 +1010,83 @@ if uploaded_files:
             progress_bar.empty()
             status_text.empty()
             
+            # 根据输出格式确定文件扩展名
+            format_ext_map = {
+                'WAV': 'wav',
+                'PCM': 'pcm',
+                'MP3': 'mp3',
+                'M4A': 'm4a'
+            }
+            output_ext = format_ext_map.get(output_format, 'wav')
+            
+            # 如果启用了分割,对每个转换后的文件执行分割
+            if enable_split:
+                st.subheader(" 正在分割音频...")
+                split_progress = st.progress(0)
+                split_status = st.empty()
+                            
+                all_split_files = []
+                temp_split_dir = "temp_split_output"
+                            
+                for idx, (fname, fdata) in enumerate(converted_files):
+                    split_status.text(f"正在分割: {fname} ({idx+1}/{len(converted_files)})")
+                                
+                    # 保存临时文件
+                    temp_input = f"temp_split_input_{idx}.{output_ext}"
+                    with open(temp_input, 'wb') as f:
+                        f.write(fdata)
+                                
+                    try:
+                        # 根据分割模式执行不同的分割函数
+                        if split_mode == " 智能分割(基于静音检测)":
+                            # 智能分割:基于静音检测
+                            split_files = split_audio_by_silence(
+                                temp_input, temp_split_dir, 
+                                silence_threshold, min_silence_duration, 
+                                split_format.lower()
+                            )
+                        else:
+                            # 按固定时长分割
+                            split_files = split_audio(
+                                temp_input, temp_split_dir, 
+                                split_duration, split_format.lower()
+                            )
+                                    
+                        # 读取分割后的文件
+                        for split_file in split_files:
+                            with open(split_file, 'rb') as f:
+                                split_data = f.read()
+                            split_name = os.path.basename(split_file)
+                            all_split_files.append((split_name, split_data))
+                            os.remove(split_file)  # 清理分割文件
+                                    
+                        # 删除临时目录(如果为空)
+                        try:
+                            os.rmdir(temp_split_dir)
+                        except:
+                            pass
+                                    
+                    except Exception as e:
+                        st.error(f" 分割失败 {fname}: {str(e)}")
+                    finally:
+                        if os.path.exists(temp_input):
+                            os.remove(temp_input)
+                                
+                    split_progress.progress((idx + 1) / len(converted_files))
+                
+                split_progress.empty()
+                split_status.empty()
+                
+                # 使用分割后的文件
+                if all_split_files:
+                    converted_files = all_split_files
+                    st.success(f"✅ 成功分割为 {len(converted_files)} 个文件")
+            
             # 显示结果
             if converted_files:
-                st.success(f"✅ 成功处理 {len(converted_files)} 个文件")
+                st.success(f"✅ 最终生成 {len(converted_files)} 个文件")
                 
                 if len(converted_files) == 1:
-                    # 单个文件直接下载
                     fname, fdata = converted_files[0]
                     st.download_button(
                         label=f"📥 下载 {fname}",
@@ -705,14 +1102,19 @@ if uploaded_files:
                         for fname, fdata in converted_files:
                             zip_file.writestr(fname, fdata)
                     
+                    download_label = " 下载全部结果 (ZIP)"
+                    download_filename = f"converted_{output_format.lower()}_files.zip"
+                    if enable_split:
+                        download_filename = f"split_{split_format.lower()}_files.zip"
+                    
                     st.download_button(
-                        label="📥 下载全部结果 (ZIP)",
+                        label=download_label,
                         data=zip_buffer.getvalue(),
-                        file_name=f"converted_{output_format.lower()}_files.zip",
+                        file_name=download_filename,
                         mime="application/zip",
                         key="download_zip"
                     )
-            
+
             if failed_files:
                 st.warning(f"⚠️ {len(failed_files)} 个文件处理失败:")
                 for fname, error in failed_files:
@@ -722,3 +1124,5 @@ if uploaded_files:
 
 st.markdown("---")
 st.caption("🎵 音频处理工具箱 Pro | 支持格式转换、采样率调整、声道转换、音频裁剪")
+
+
