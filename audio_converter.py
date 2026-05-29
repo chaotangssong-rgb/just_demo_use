@@ -134,7 +134,7 @@ def normalize_audio(input_path, output_path, target_db=-3.0):
     ]
     subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
-def split_audio(input_path, output_dir, segment_duration, output_format='wav'):
+def split_audio(input_path, output_dir, segment_duration, output_format='wav', sr=16000, channels=1):
     """将音频分割成多个小段(按固定时长)
     
     Args:
@@ -142,6 +142,8 @@ def split_audio(input_path, output_dir, segment_duration, output_format='wav'):
         output_dir: 输出目录
         segment_duration: 每段时长(秒)
         output_format: 输出格式
+        sr: 采样率(PCM格式需要)
+        channels: 声道数(PCM格式需要)
     
     Returns:
         list: 分割后的文件路径列表
@@ -149,7 +151,7 @@ def split_audio(input_path, output_dir, segment_duration, output_format='wav'):
     os.makedirs(output_dir, exist_ok=True)
     
     # 获取音频时长
-    duration, sr, ch, codec = get_audio_info(input_path)
+    duration, audio_sr, audio_ch, codec = get_audio_info(input_path)
     if not duration:
         raise RuntimeError("无法获取音频时长")
     
@@ -163,19 +165,30 @@ def split_audio(input_path, output_dir, segment_duration, output_format='wav'):
         start_time = i * segment_duration
         output_file = os.path.join(output_dir, f"{base_name}_part{i+1:03d}.{output_format}")
         
-        command = [
-            'ffmpeg', '-i', input_path,
-            '-ss', str(start_time),
-            '-t', str(segment_duration),
-            '-y', output_file
-        ]
+        # PCM格式需要特殊处理
+        if output_format == 'pcm':
+            command = [
+                'ffmpeg', '-i', input_path,
+                '-ss', str(start_time),
+                '-t', str(segment_duration),
+                '-f', 's16le', '-acodec', 'pcm_s16le',
+                '-ar', str(sr), '-ac', str(channels),
+                '-y', output_file
+            ]
+        else:
+            command = [
+                'ffmpeg', '-i', input_path,
+                '-ss', str(start_time),
+                '-t', str(segment_duration),
+                '-y', output_file
+            ]
         
         subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         output_files.append(output_file)
     
     return output_files
 
-def split_audio_by_silence(input_path, output_dir, silence_threshold=-50, min_silence_duration=0.5, output_format='wav'):
+def split_audio_by_silence(input_path, output_dir, silence_threshold=-50, min_silence_duration=0.5, output_format='wav', sr=16000, channels=1):
     """基于静音检测的智能音频分割
     
     Args:
@@ -184,6 +197,8 @@ def split_audio_by_silence(input_path, output_dir, silence_threshold=-50, min_si
         silence_threshold: 静音阈值(dB),低于此值认为是静音,默认-50dB
         min_silence_duration: 最小静音持续时间(秒),超过此时长才认为是有意义的停顿,默认0.5秒
         output_format: 输出格式
+        sr: 采样率(PCM格式需要)
+        channels: 声道数(PCM格式需要)
     
     Returns:
         list: 分割后的文件路径列表
@@ -216,7 +231,7 @@ def split_audio_by_silence(input_path, output_dir, silence_threshold=-50, min_si
                 silence_ends.append(float(match.group(1)))
     
     # 获取音频总时长
-    duration, sr, ch, codec = get_audio_info(input_path)
+    duration, audio_sr, audio_ch, codec = get_audio_info(input_path)
     if not duration:
         raise RuntimeError("无法获取音频时长")
     
@@ -252,12 +267,23 @@ def split_audio_by_silence(input_path, output_dir, silence_threshold=-50, min_si
     for idx, (start, end) in enumerate(segments):
         output_file = os.path.join(output_dir, f"{base_name}_segment{idx+1:03d}.{output_format}")
         
-        command = [
-            'ffmpeg', '-i', input_path,
-            '-ss', str(start),
-            '-to', str(end),
-            '-y', output_file
-        ]
+        # PCM格式需要特殊处理
+        if output_format == 'pcm':
+            command = [
+                'ffmpeg', '-i', input_path,
+                '-ss', str(start),
+                '-to', str(end),
+                '-f', 's16le', '-acodec', 'pcm_s16le',
+                '-ar', str(sr), '-ac', str(channels),
+                '-y', output_file
+            ]
+        else:
+            command = [
+                'ffmpeg', '-i', input_path,
+                '-ss', str(start),
+                '-to', str(end),
+                '-y', output_file
+            ]
         
         subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         output_files.append(output_file)
@@ -807,7 +833,7 @@ if uploaded_files:
     # 音频分割设置
     st.subheader(" 音频分割 (可选)")
     enable_split = st.checkbox("启用音频分割", key="enable_split")
-        
+            
     if enable_split:
         # 选择分割模式
         split_mode = st.radio(
@@ -816,10 +842,10 @@ if uploaded_files:
             horizontal=True,
             key="split_mode_radio"
         )
-            
+                
         if split_mode == " 按固定时长分割":
             st.info(" 将每个音频文件按指定时长平均分割成多个小段")
-                
+                    
             col1, col2 = st.columns(2)
             with col1:
                 split_duration = st.number_input(
@@ -831,20 +857,14 @@ if uploaded_files:
                     format="%.1f",
                     key="split_duration"
                 )
-            with col2:
-                split_format = st.selectbox(
-                    "分割后格式",
-                    ["WAV", "MP3", "M4A", "PCM"],
-                    index=0,
-                    key="split_format"
-                )
-                
+                    
             st.success(f" 每 {split_duration:.1f}秒 分割一次")
-                
+            st.info(" 分割格式将自动使用上方设置的输出格式: **{output_format}**")
+                    
         else:  # 智能分割
             st.info(" 自动识别音频中的静音/停顿,将内容按自然分段切割,适合语音、播客、会议录音等")
-                
-            col1, col2, col3 = st.columns(3)
+                    
+            col1, col2 = st.columns(2)
             with col1:
                 silence_threshold = st.slider(
                     "静音阈值 (dB)",
@@ -867,19 +887,13 @@ if uploaded_files:
                     key="min_silence_duration",
                     help="静音持续时间超过此值才认为是有效的分段点"
                 )
-            with col3:
-                split_format = st.selectbox(
-                    "分割后格式",
-                    ["WAV", "MP3", "M4A", "PCM"],
-                    index=0,
-                    key="split_format_smart"
-                )
-                
+                    
             st.success(f" 阈值: {silence_threshold:.1f}dB, 最小静音: {min_silence_duration:.1f}秒")
             st.caption("💡 提示: 语音通常使用 -50dB/0.5秒,音乐使用 -60dB/0.3秒")
-            
+            st.info(" 分割格式将自动使用上方设置的输出格式: **{output_format}**")
+                
         if len(uploaded_files) > 1:
-            st.warning(f"️ 将对所有 {len(uploaded_files)} 个文件执行分割")
+            st.warning(f" 将对所有 {len(uploaded_files)} 个文件执行分割")
     
     st.divider()
     
@@ -908,7 +922,6 @@ if uploaded_files:
     if not enable_split:
         split_mode = " 按固定时长分割"
         split_duration = 10.0
-        split_format = 'wav'
         silence_threshold = -50.0
         min_silence_duration = 0.5
     
@@ -1038,18 +1051,23 @@ if uploaded_files:
                                 
                     try:
                         # 根据分割模式执行不同的分割函数
+                        # 分割格式自动使用上方设置的output_format
+                        split_format_lower = output_format.lower()
+                        
                         if split_mode == " 智能分割(基于静音检测)":
                             # 智能分割:基于静音检测
                             split_files = split_audio_by_silence(
                                 temp_input, temp_split_dir, 
                                 silence_threshold, min_silence_duration, 
-                                split_format.lower()
+                                split_format_lower,
+                                output_sr, output_channels  # 传递采样率和声道参数
                             )
                         else:
                             # 按固定时长分割
                             split_files = split_audio(
                                 temp_input, temp_split_dir, 
-                                split_duration, split_format.lower()
+                                split_duration, split_format_lower,
+                                output_sr, output_channels  # 传递采样率和声道参数
                             )
                                     
                         # 读取分割后的文件
@@ -1057,7 +1075,18 @@ if uploaded_files:
                             with open(split_file, 'rb') as f:
                                 split_data = f.read()
                             split_name = os.path.basename(split_file)
-                            all_split_files.append((split_name, split_data))
+                            
+                            # 检查文件是否有效(时长>0.1秒)
+                            try:
+                                split_duration_check, _, _, _ = get_audio_info(split_file)
+                                if split_duration_check and split_duration_check > 0.1:
+                                    all_split_files.append((split_name, split_data))
+                                else:
+                                    print(f"跳过无效片段: {split_name} (时长: {split_duration_check}秒)")
+                            except:
+                                # 如果无法获取时长,保留文件
+                                all_split_files.append((split_name, split_data))
+                            
                             os.remove(split_file)  # 清理分割文件
                                     
                         # 删除临时目录(如果为空)
@@ -1159,7 +1188,7 @@ if uploaded_files:
                     download_label = " 下载全部结果 (ZIP)"
                     download_filename = f"converted_{output_format.lower()}_files.zip"
                     if enable_split:
-                        download_filename = f"split_{split_format.lower()}_files.zip"
+                        download_filename = f"split_{output_format.lower()}_files.zip"
                     
                     st.download_button(
                         label=download_label,
