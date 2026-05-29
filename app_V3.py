@@ -39,7 +39,7 @@ def get_audio_info(file_path):
         return None, None, None, None
 
 def convert_audio(input_path, output_path, target_format='wav', target_sr=16000, target_channels=1):
-    """使用ffmpeg转换音频"""
+    """使用ffmpeg转换音频(优化性能版)"""
     codec_map = {
         'wav': 'pcm_s16le',
         'pcm': 'pcm_s16le',
@@ -50,6 +50,9 @@ def convert_audio(input_path, output_path, target_format='wav', target_sr=16000,
     codec = codec_map.get(target_format, 'pcm_s16le')
     
     command = ['ffmpeg', '-i', input_path]
+    
+    # 性能优化:使用多线程加速
+    command.extend(['-threads', '0'])  # 0表示自动使用所有CPU核心
     
     if target_format == 'pcm':
         # PCM输出需要特殊处理
@@ -63,7 +66,13 @@ def convert_audio(input_path, output_path, target_format='wav', target_sr=16000,
         '-y', output_path
     ])
     
-    subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        # 性能优化:不捕获输出,直接输出到控制台,减少内存开销
+        result = subprocess.run(command, check=True)
+    except subprocess.CalledProcessError as e:
+        # 输出详细的错误信息
+        error_msg = f"FFmpeg命令失败:\n命令: {' '.join(command)}"
+        raise RuntimeError(error_msg) from e
 
 def pcm_to_wav_buffer(pcm_data, sample_rate=16000, channels=1):
     """将PCM数据转换为WAV格式的BytesIO"""
@@ -346,12 +355,14 @@ if uploaded_files:
             failed_files = []
             
             for idx, audio_file in enumerate(uploaded_files):
-                status_text.text(f"正在处理: {audio_file.name}")
+                # 性能优化:每10个文件更新一次进度,减少界面刷新
+                if idx % 10 == 0 or idx == len(uploaded_files) - 1:
+                    status_text.text(f"正在处理: {audio_file.name} ({idx+1}/{len(uploaded_files)})")
                 
-                input_path = f"temp_input_{audio_file.name}"
+                input_path = f"temp_input_{idx}_{audio_file.name}"
                 output_ext = output_format.lower()
                 base_name = os.path.splitext(audio_file.name)[0]
-                output_path = f"temp_output_{base_name}.{output_ext}"
+                output_path = f"temp_output_{idx}_{base_name}.{output_ext}"
                 
                 try:
                     # 保存上传文件
@@ -430,36 +441,55 @@ if uploaded_files:
                         sr = pcm_params.get('sample_rate', 16000)
                         ch = pcm_params.get('channels', 1)
                         
-                        if output_format == 'PCM':
+                        # 性能优化:如果不需要转换,直接复制文件
+                        if output_format == 'PCM' and output_sr == sr and output_channels == ch and not enable_crop:
+                            import shutil
+                            shutil.copy2(input_path, output_path)
+                        elif output_format == 'PCM':
                             # PCM转PCM:只需修改采样率/声道数
                             # 先用Python的wave模块添加WAV头,再用ffmpeg转换
-                            wav_path = f"temp_intermediate.wav"
-                            with wave.open(wav_path, 'wb') as wf:
-                                wf.setnchannels(ch)
-                                wf.setsampwidth(2)
-                                wf.setframerate(sr)
-                                with open(input_path, 'rb') as pf:
-                                    wf.writeframes(pf.read())
-                            
-                            # 然后用ffmpeg转换采样率/声道数
-                            convert_audio(wav_path, output_path, 'pcm', output_sr, output_channels)
-                            if os.path.exists(wav_path):
-                                os.remove(wav_path)
+                            wav_path = f"temp_intermediate_{idx}.wav"
+                            try:
+                                with wave.open(wav_path, 'wb') as wf:
+                                    wf.setnchannels(ch)
+                                    wf.setsampwidth(2)
+                                    wf.setframerate(sr)
+                                    with open(input_path, 'rb') as pf:
+                                        wf.writeframes(pf.read())
+                                
+                                # 然后用ffmpeg转换采样率/声道数
+                                convert_audio(wav_path, output_path, 'pcm', output_sr, output_channels)
+                            except Exception as e:
+                                # 如果ffmpeg失败,尝试直接使用Python处理
+                                if output_sr == sr and output_channels == ch:
+                                    # 不需要转换,直接使用裁剪后的文件
+                                    import shutil
+                                    shutil.copy2(input_path, output_path)
+                                else:
+                                    raise e
+                            finally:
+                                if os.path.exists(wav_path):
+                                    os.remove(wav_path)
                         else:
                             # PCM转其他格式(WAV/MP3/M4A)
                             # 先用Python的wave模块添加WAV头
-                            wav_path = f"temp_intermediate.wav"
-                            with wave.open(wav_path, 'wb') as wf:
-                                wf.setnchannels(ch)
-                                wf.setsampwidth(2)
-                                wf.setframerate(sr)
-                                with open(input_path, 'rb') as pf:
-                                    wf.writeframes(pf.read())
-                            
-                            # 然后用ffmpeg转换为目标格式
-                            convert_audio(wav_path, output_path, output_format.lower(), output_sr, output_channels)
-                            if os.path.exists(wav_path):
-                                os.remove(wav_path)
+                            wav_path = f"temp_intermediate_{idx}.wav"
+                            try:
+                                with wave.open(wav_path, 'wb') as wf:
+                                    wf.setnchannels(ch)
+                                    wf.setsampwidth(2)
+                                    wf.setframerate(sr)
+                                    with open(input_path, 'rb') as pf:
+                                        wf.writeframes(pf.read())
+                                
+                                # 然后用ffmpeg转换为目标格式
+                                convert_audio(wav_path, output_path, output_format.lower(), output_sr, output_channels)
+                            except Exception as e:
+                                st.error(f"❌ {audio_file.name} 转换失败: {str(e)}")
+                                raise e
+                            finally:
+                                if os.path.exists(wav_path):
+                                    os.remove(wav_path)
                     else:
                         # 非PCM文件直接转换
                         convert_audio(input_path, output_path, output_format.lower(), output_sr, output_channels)
@@ -476,7 +506,7 @@ if uploaded_files:
                 
                 finally:
                     # 清理临时文件
-                    for tmp in [input_path, output_path, f"temp_cropped_{audio_file.name}"]:
+                    for tmp in [input_path, output_path, f"temp_cropped_{idx}_{audio_file.name}", f"temp_intermediate_{idx}.wav"]:
                         if os.path.exists(tmp):
                             os.remove(tmp)
                 
